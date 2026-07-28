@@ -1,0 +1,182 @@
+---
+title: "Switch Between MIXXX and Engine OS at Runtime"
+sidebarTitle: "Switching"
+description: "Use switch-to-mixxx and switch-to-engine SSH commands to toggle between MIXXX and stock Engine OS without rebooting or removing the SD card."
+---
+
+primemixxx supports two operating modes on the same hardware: MIXXX mode (SD card present, TKGL boot hook installed) and Engine OS mode (SD card removed, or Engine OS explicitly started). You can switch between them at runtime over SSH without rebooting, and switch at boot time simply by inserting or removing the SD card.
+
+## Two Modes
+
+| Mode | How to Activate | What Runs |
+|---|---|---|
+| **MIXXX mode** | SD card inserted at power-on (boot-time), or `switch-to-mixxx` (runtime) | TKGL bootstrap → `mixxx-app.service` → MIXXX |
+| **Engine OS mode** | SD card removed at power-on (boot-time), or `switch-to-engine` (runtime) | Stock `engine.service` → Engine DJ |
+
+## One-Time Install: The TKGL Boot Hook
+
+Before the SD card can auto-launch MIXXX at boot, you need to install the TKGL boot hook to the device's internal eMMC. This is a one-time step run from the SD card itself.
+
+<Steps>
+  <Step title="Insert SD card and SSH in">
+    ```bash
+    ssh root@192.168.42.1   # USB Ethernet (preferred)
+    # or
+    ssh root@primego.local  # WiFi
+    # Password: denonprime4
+    ```
+  </Step>
+
+  <Step title="Run the install script">
+    ```bash
+    sh /media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/install-device.sh
+    ```
+
+    The installer performs these steps automatically:
+
+    1. Remounts the rootfs read-write
+    2. Copies `tkgl-bootstrap-stub.sh` to `/data/tkgl-bootstrap-launcher`
+    3. Backs up `/etc/systemd/system/engine.service` → `engine.service.orig`
+    4. Installs the TKGL stub as the new `engine.service`
+    5. Runs `systemctl daemon-reload && systemctl enable engine.service`
+
+    After the core install, the script interactively offers optional services:
+
+    | Prompt | Service | Effect |
+    |---|---|---|
+    | USB Ethernet gadget | `usb-gadget-eth.service` | SSH via USB-C cable at `192.168.42.1` |
+    | Power button monitor | `powerbutton-monitor.service` | Graceful shutdown on power button press |
+    | mDNS fix | `fix-mdns.service` | Advertises `primego.local` instead of `buildroot.local` |
+    | WiFi powersave off | `99-wifi-power-save.rules` | Prevents SSH dropouts over WiFi |
+  </Step>
+
+  <Step title="Reboot">
+    ```bash
+    reboot
+    ```
+
+    After reboot, the device detects the SD card and automatically launches MIXXX — no SSH needed.
+  </Step>
+</Steps>
+
+## Uninstalling the Boot Hook
+
+To fully remove TKGL and return to stock Engine OS:
+
+```bash
+sh /media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/uninstall-device.sh
+```
+
+The uninstall script is the inverse of `install-device.sh`. It stops MIXXX, removes the TKGL stub, restores `engine.service.orig`, and interactively asks which optional services to keep or remove.
+
+## Runtime Switching
+
+Once the boot hook is installed, you can toggle between MIXXX and Engine OS over SSH at any time without rebooting.
+
+<Tip>
+  Use USB Ethernet (`192.168.42.1`) for reliable SSH access. WiFi connections drop after ~30 seconds of silence — if you are switching modes or monitoring services over WiFi, keep a keepalive ping running: `ping -i 25 <device-ip> > /dev/null &`
+</Tip>
+
+### Switch to MIXXX
+
+```bash
+ssh root@192.168.42.1 switch-to-mixxx
+```
+
+What the script does internally:
+
+```sh
+mount -o remount,rw / 2>/dev/null || true
+systemctl stop engine.service
+chmod +x /media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/mixxx_launcher.sh
+systemctl start mixxx.service
+systemctl start powerbutton-monitor.service
+```
+
+### Switch to Engine OS
+
+```bash
+ssh root@192.168.42.1 switch-to-engine
+```
+
+What the script does internally:
+
+```sh
+systemctl stop mixxx.service
+systemctl stop powerbutton-monitor.service
+systemctl start engine.service
+```
+
+## Boot-Time Switching
+
+You do not need SSH for boot-time switching:
+
+| Action | Effect |
+|---|---|
+| **Insert SD card before power-on** | TKGL hook detects the card, auto-launches MIXXX |
+| **Remove SD card before power-on** | TKGL hook finds no card, falls back to original `engine.service.orig` |
+
+The fallback is unconditional — stock Engine OS boots without any SD card present, just as it did before TKGL was installed.
+
+## Restarting MIXXX Correctly
+
+MIXXX runs as a **transient systemd unit** (`mixxx-app.service`) created by the TKGL module via:
+
+```bash
+systemd-run --unit=mixxx-app -- /data/mixxx/mixxx
+```
+
+The TKGL module (`tkgl_mod_mixxx.sh`) checks whether `mixxx-app.service` is already active before launching. If it is active — even with a dead PID — TKGL skips relaunch entirely.
+
+This means standard restart commands do **not** work correctly. The only correct restart sequence is:
+
+```bash
+# 1. Stop the transient unit first (makes it inactive)
+systemctl stop mixxx-app.service
+
+# 2. Trigger TKGL to recreate it
+systemctl restart engine.service
+```
+
+<Warning>
+  **Do not use these methods to restart MIXXX — they silently fail:**
+
+  ```bash
+  systemctl restart mixxx-app.service   # TKGL sees the unit still "active", skips relaunch
+  pkill mixxx                            # PID dies but transient unit stays "active", TKGL skips
+  kill -9 <pid>                          # Same problem as pkill
+  ```
+
+  In all three cases, TKGL's idempotency guard sees an active `mixxx-app.service` and exits without relaunching MIXXX. The display goes black with no error.
+</Warning>
+
+## mixxx-app.service Masking
+
+<Warning>
+  `mixxx-app.service` must **not** be masked. If it is masked (symlinked to `/dev/null`), `systemd-run --unit=mixxx-app` fails silently and MIXXX will not start at boot.
+
+  To check and fix masking:
+
+  ```bash
+  # Check if masked
+  systemctl status mixxx-app.service
+
+  # Unmask if needed
+  systemctl unmask mixxx-app.service
+  ```
+</Warning>
+
+## Systemd Service Relationships
+
+```
+engine.service (TKGL stub)
+  └─ TKGL bootstrap launcher (/data/tkgl-bootstrap-launcher)
+       └─ mod_mixxx module (tkgl_mod_mixxx.sh)
+            └─ systemd-run --unit=mixxx-app
+                 └─ mixxx-app.service  ← transient unit
+                      └─ /data/mixxx/mixxx (thin delegator)
+                           └─ /media/az01-internal/mixxx/mixxx_launcher.sh
+                                └─ MIXXX binary
+```
+
+The key property of this chain: if anything in the TKGL layer fails — missing SD card, corrupt launcher, wrong permissions — you can always remove the SD card and reboot to drop back to stock Engine OS via `engine.service.orig`.

@@ -1,0 +1,135 @@
+---
+title: "Supported Devices: Prime Go and Prime 4 Compatibility"
+sidebarTitle: "Devices"
+description: "Hardware compatibility status for Denon Prime Go and Prime 4, including SoC specs, display differences, and known limitations per device."
+---
+
+primemixxx targets the Denon Prime Go and Prime 4, both of which share a Rockchip RK3288 ARMv7 SoC running a stripped-down Buildroot Linux environment beneath Engine OS. The two devices are nearly identical at the hardware level, but their display controllers differ in a way that currently limits Prime 4 support. This page covers the compatibility status, shared hardware specifications, and the display differences that determine what works on each device.
+
+## Compatibility Summary
+
+<CardGroup cols={2}>
+  <Card title="Prime Go" icon="circle-check">
+    **✅ Fully Verified**
+
+    Display, audio, touchscreen, and all MIDI controls are functional. MIXXX runs natively on the LVDS-1 display at 1280×800. Audio latency: **5.8 ms**.
+  </Card>
+  <Card title="Prime 4" icon="triangle-exclamation">
+    **⚠️ Partial Support**
+
+    MIXXX boots and all audio/MIDI controls work. The DSI-1 display causes a GPU crash on EGL initialization — MIXXX currently runs in offscreen mode with no on-device display output.
+  </Card>
+</CardGroup>
+
+| Feature | Prime Go | Prime 4 |
+|---|:---:|:---:|
+| MIXXX boots | ✅ | ✅ |
+| Audio output | ✅ | ✅ |
+| MIDI controls (platters, faders, pads) | ✅ | ✅ |
+| Touchscreen input | ✅ | ✅ |
+| On-device display | ✅ | ⚠️ Offscreen only |
+| Verified stable at 5.8 ms | ✅ | Not tested |
+
+---
+
+## Shared Hardware Specifications
+
+Both devices use the same core hardware platform.
+
+| Component | Detail |
+|---|---|
+| **SoC** | Rockchip RK3288 ARMv7 (Cortex-A17, 4 cores) |
+| **GPU** | Mali-T76x (4 cores, r1p0 0x0750) |
+| **Kernel** | `6.1.111-inmusic-2024-09-19-rt41` with `PREEMPT_RT` |
+| **OS** | Stripped Buildroot Linux — no X11, no Wayland |
+| **Display** | 7-inch touchscreen, 800×1280 portrait physical framebuffer, rotated to 1280×800 landscape by display controller |
+| **Touchscreen** | ILI2117 on `/dev/input/event0` |
+| **Audio** | XMOS XS1-U6A USB audio controller → AKM AK4621 CODEC + AK4413 DAC |
+| **MIDI** | Internal USB MIDI — platters, faders, pads, encoders, crossfader all exposed |
+
+### Why PREEMPT_RT
+
+The kernel ships with full real-time preemption (`CONFIG_PREEMPT_RT`), which guarantees that audio threads cannot be blocked by kernel syscalls. MIXXX's audio engine threads run at `SCHED_FIFO` priority 98, pinned to CPU cores 2–3. Without PREEMPT_RT, any syscall in the kernel path could block the audio thread and cause dropouts. The result is a stable **5.8 ms (256/512 ALSA buffer)** on the Prime Go.
+
+### CPU Shielding
+
+primemixxx applies aggressive CPU isolation at launch time:
+
+- **Audio-critical threads** (`EngineWorkerSch`, `EngineSideChain`): `SCHED_FIFO` priority 98, pinned to cores 2–3
+- **Non-audio threads** (Mali GPU, touchscreen, CachingReader, Qt thread pool, GLib): `SCHED_OTHER`, banished to cores 0–1
+- **Main thread**: `SCHED_FIFO` priority 1 on cores 2–3 (low-RT for MIDI and UI events)
+- **IRQ affinity**: all non-audio IRQs (GPU, USB, MMC) pinned to CPU 0 at boot
+
+---
+
+## Per-Device Details
+
+### Prime Go
+
+The Prime Go is the fully verified target. All hardware features work with primemixxx.
+
+- **Display connector**: LVDS-1
+- **Native resolution**: 800×1280 portrait framebuffer, rotated to **1280×800 landscape** by the display controller
+- **EGLFS rotation**: 90°
+- **Touchscreen**: ILI2117 on `/dev/input/event0`, calibrated to the rotated landscape orientation
+- **Audio latency**: 5.8 ms (256/512 ALSA buffer) with CPU shielding enabled
+- **MIDI**: All controls exposed — platters, channel faders, EQ knobs, trim, pads, transport buttons, crossfader, browse encoder, DJ FX section
+- **USB Ethernet gadget**: auto-starts at boot, device accessible at `192.168.42.1`
+
+The Prime Go's LVDS-1 display is directly compatible with the Mali EGLFS integration plugin compiled into the SD card bundle. Qt 5.15.8 takes over the display from `fbcon` cleanly, and the custom `libqeglfs-mali-integration.so` renders MIXXX's UI at full resolution without tearing.
+
+### Prime 4
+
+The Prime 4 shares the same SoC, audio hardware, and MIDI layout as the Prime Go, but uses a DSI-1 display interface instead of LVDS-1.
+
+<Warning>
+**DSI display causes GPU crash on EGL init.** The Prime 4's DSI-1 display is not compatible with the current Mali EGLFS stack. MIXXX segfaults during EGL initialization when run with the standard `eglfs` platform. To verify that MIXXX itself works, run it with `-platform offscreen`. Audio and MIDI are fully functional in offscreen mode — only the display output is missing. Native DSI display support requires further investigation into the DDK/DSI interface.
+</Warning>
+
+- **Display connector**: DSI-1
+- **Current display support**: Offscreen mode only (`-platform offscreen`)
+- **Audio**: Functional (same XMOS/AKM hardware chain as Prime Go)
+- **MIDI**: Functional (same internal USB MIDI layout as Prime Go)
+- **EGLFS rotation**: 270° (differs from Prime Go)
+
+---
+
+## Prime Go vs Prime 4 Differences
+
+| Property | Prime Go | Prime 4 |
+|---|---|---|
+| Display interface | LVDS-1 | DSI-1 |
+| EGLFS rotation | 90° | 270° |
+| Display vsync | Standard | Incompatible with current EGL stack |
+| MIXXX display output | ✅ Native 1280×800 | ⚠️ Offscreen only |
+| Audio | ✅ Functional | ✅ Functional |
+| MIDI | ✅ Functional | ✅ Functional |
+| Touch | ✅ Functional | ✅ Functional |
+| Verified latency | 5.8 ms | Not yet tested |
+| Engine OS internal ID | `PRIMEGO` (JP11) | `PRIME4` (JC11) |
+
+---
+
+## Audio Hardware Chain
+
+Both devices route audio through the same hardware stack:
+
+```
+MIXXX (ALSA) → XMOS XS1-U6A USB audio controller
+                  → AKM AK4621 CODEC    (ADC + DAC, main outputs)
+                  → AKM AK4413 DAC      (additional output channels)
+```
+
+The XMOS controller presents as a standard USB audio device to the Linux kernel, which means ALSA sees it as a class-compliant interface. No custom kernel driver is required.
+
+---
+
+## Mali GPU Notes
+
+The device's Mali-T76x GPU is hardware revision **r1p0**. Buildroot's default Mali DDK ships as r0p0, which causes EGL initialization to fail with:
+
+```
+DDK is not compatible with hardware: DDK version r0p0 0x0720, hardware version r1p0 0x0750
+```
+
+primemixxx works around this by symlinking the bundle's `libEGL.so`, `libGLESv2.so`, and `libGLESv1_CM.so` to the device's native `/usr/lib/libmali.so.14.0` (r1p0). This is done automatically by the SD card bundle — no manual intervention is required on the Prime Go. On the Prime 4, the same symlinks are applied, but the DSI-1 display interface introduces a second incompatibility that is not yet resolved.

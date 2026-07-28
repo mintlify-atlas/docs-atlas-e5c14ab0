@@ -1,0 +1,109 @@
+---
+title: "Boot Chain: From Power-On to MIXXX Launch"
+sidebarTitle: "Boot Chain"
+description: "How primemixxx launches MIXXX from SD card through the TKGL Bootstrap framework, systemd, and the two-stage launcher delegation chain."
+---
+
+Every time a Denon Prime Go or Prime 4 powers on with the primemixxx SD card present, a carefully ordered sequence of events carries control from U-Boot through systemd and the TKGL Bootstrap framework until MIXXX is running as a live transient service — all without touching the device's internal Engine OS installation.
+
+## Full Boot Chain
+
+The complete path from power button to MIXXX running on-screen:
+
+```
+Device power-on
+  → U-Boot → Linux kernel
+    → systemd
+      → tkgl-mixxx.service (enabled)
+        → /data/tkgl-bootstrap-launcher
+          → sources mod_mixxx/tkgl_mod_mixxx.sh
+            → systemd-run --unit=mixxx-app
+              → /data/mixxx/mixxx (116-byte delegation script)
+                → /media/az01-internal/mixxx/mixxx_launcher.sh
+                  → USB bind-mount + seed DB restore + env setup
+                    → MIXXX binary with CPU shielding
+```
+
+## Entry Point: `/data/mixxx/mixxx`
+
+The chain pivots at a 116-byte shell script on the device's internal storage. Its sole job is to hand execution to the real launcher on the SD card:
+
+```sh
+#!/bin/sh
+exec /media/az01-internal/mixxx/mixxx_launcher.sh "$@"
+```
+
+This thin delegation exists on **internal storage** so it survives SD card removal. All real logic — environment variables, USB mounting, database restoration, CPU shielding — lives on the SD card where it can be updated, replaced, or debugged without reflashing the device. The internal entry point only needs to exist at boot time; it never needs to change.
+
+## TKGL Bootstrap Framework
+
+TKGL is a modular boot-time script execution framework injected into the device firmware via a one-time firmware modification. At boot, the `tkgl-mixxx.service` systemd unit launches `/data/tkgl-bootstrap-launcher`, which scans the SD card for module directories and sources each module's shell script in turn.
+
+The `mod_mixxx` module (`tkgl_mod_mixxx.sh`) is responsible for:
+
+- **USB drive mounting and bind-mounting** — mounts a USB stick to the ext4 path the music library scanner expects (bypassing MIXXX's vfat sandbox block)
+- **Seed database restoration** — copies a pre-populated `mixxxdb.seed` into place if the live database is missing or under 5 KB, ensuring the library directory entry is present on first run
+- **GPU performance governor** — sets the Mali-T76x to `performance` mode before MIXXX starts
+- **Launching MIXXX** — calls `systemd-run --unit=mixxx-app -- /data/mixxx/mixxx` to create a tracked transient unit
+
+<Note>
+`tkgl_mod_mixxx.sh` checks whether `mixxx-app.service` is already active before running `systemd-run`. If the unit exists from a previous launch, TKGL skips re-launching MIXXX entirely. This means the **only correct way to restart MIXXX** after a config or skin change is to stop the transient unit first, then restart the engine service:
+
+```bash
+systemctl stop mixxx-app.service
+systemctl restart engine.service
+```
+
+Using `systemctl restart mixxx-app.service`, `pkill mixxx`, or `kill -9 <pid>` all leave the unit in an "active" state that causes TKGL to skip relaunch on the next boot cycle.
+</Note>
+
+### Non-Destructive by Design
+
+The critical property of the TKGL Bootstrap architecture is **non-destructive operation**. The device's internal storage (`/data/`) is never modified at runtime. If anything goes wrong — a broken SD card, a bad launcher script, a misconfigured environment — you can unplug the SD card and reboot. The device returns to stock Engine OS without any recovery procedure.
+
+<Warning>
+`mixxx-app.service` must **not** be masked. The TKGL module creates MIXXX as a transient unit via `systemd-run --unit=mixxx-app`. If the unit name is masked (i.e., `/etc/systemd/system/mixxx-app.service` is a symlink to `/dev/null`), `systemd-run` fails silently and MIXXX never starts.
+
+Fix a masked unit with:
+```bash
+systemctl unmask mixxx-app.service
+```
+</Warning>
+
+## Verified Boot Chain Results
+
+The following results were confirmed after a fresh device reboot (43 s uptime, tested 2026-07-13):
+
+<CardGroup cols={2}>
+  <Card title="Service Status" icon="circle-check">
+    `mixxx-app.service` transient unit created and active
+  </Card>
+  <Card title="Process" icon="circle-check">
+    MIXXX PID running from SD card binary at `/media/az01-internal/mixxx/bin/mixxx`
+  </Card>
+  <Card title="USB Music Mount" icon="circle-check">
+    `/dev/sda1` bind-mounted to `/media/az01-internal/mixxx/music`
+  </Card>
+  <Card title="Library Database" icon="circle-check">
+    307 KB `mixxxdb.sqlite` present; tracks visible in library
+  </Card>
+</CardGroup>
+
+## Architecture Decisions
+
+Several non-obvious choices in the boot chain exist to work around hard constraints in the hardware and firmware stack.
+
+<CardGroup cols={1}>
+  <Card title="Why Qt 5.15.8 on the SD card (not device Qt 5.15.2)" icon="layer-group">
+    The device's native Qt 5.15.2 uses the `eglfs_emu` platform integration, which cannot take over the display from `fbcon`. MIXXX produces a black screen. The SD card carries a custom-built Qt 5.15.8 with `libqeglfs-mali-integration.so` (14 KB) compiled from the same Buildroot environment as MIXXX, which correctly initialises the Mali-T76x and takes over the framebuffer.
+  </Card>
+  <Card title="Why PREEMPT_RT" icon="stopwatch">
+    The kernel is built with `CONFIG_PREEMPT_RT` (full preemption). Without it, the kernel can block audio threads during syscalls, causing audible dropouts. With PREEMPT_RT, MIXXX's audio engine threads run at `SCHED_FIFO` priority 98 on dedicated CPU cores 2–3, guaranteeing sub-5 ms audio latency.
+  </Card>
+  <Card title="Why Mali r1p0 (not Buildroot r0p0)" icon="microchip">
+    The device's Mali GPU is hardware revision r1p0. Buildroot ships DDK r0p0 by default. The user-space `libmali.so` must match the kernel ABI exactly — a DDK version mismatch causes EGL initialisation failure at startup. The fix is to symlink the SD card's `libEGL.so`, `libGLESv2.so`, and `libGLESv1_CM.so` to the device's native `/usr/lib/libmali.so.14.0`.
+  </Card>
+  <Card title="Why two MIXXX binaries exist" icon="copy">
+    Buildroot produces two ARM binaries: `lib/bin/mixxx` (~10 MB, stripped) works correctly with EGLFS; `mixxx.real` (~17 MB, unstripped) crashes immediately with `EGLFS: OpenGL windows cannot be mixed with others`. Only the 10 MB binary is functional. The top-level `bin/mixxx` is a symlink pointing to `../lib/bin/mixxx` — do not change it to point to `mixxx.real`.
+  </Card>
+</CardGroup>

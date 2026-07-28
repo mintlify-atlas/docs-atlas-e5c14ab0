@@ -1,0 +1,159 @@
+---
+title: "Display and GPU Configuration: Mali-T76x on EGLFS"
+sidebarTitle: "Display & GPU"
+description: "How primemixxx drives the Prime Go and Prime 4 touchscreen displays using Qt 5.15.8 EGLFS with a custom Mali-T76x r1p0 integration plugin."
+---
+
+Getting a Qt application to render on the Denon Prime's embedded display is more involved than setting `QT_QPA_PLATFORM=eglfs`. The hardware carries a Mali-T76x GPU at a specific DDK revision that conflicts with the default Buildroot driver, the display controller applies a portrait-to-landscape rotation that the Qt coordinate system must match, and the device's own Qt installation uses an EGLFS backend that cannot take over the framebuffer. All three issues must be resolved together before MIXXX produces any visible output.
+
+## Hardware Overview
+
+| Component | Detail |
+|---|---|
+| GPU | Mali-T76x (4 cores, r1p0 `0x0750`) on Rockchip RK3288 |
+| Display connector | LVDS-1 (Prime Go) / DSI-1 (Prime 4) |
+| Native framebuffer | 800×1280 portrait |
+| Qt logical screen | 1280×800 landscape (display controller rotates the framebuffer) |
+| Touchscreen | ILI2117 on `/dev/input/event0` |
+| KMS/DRM device | `/dev/dri/card0` |
+
+The display controller rotates the 800×1280 portrait framebuffer to 1280×800 landscape in hardware. Qt must be told about this rotation so its logical coordinate system matches what the user sees on screen.
+
+## DDK Mismatch: The Critical Problem
+
+The stock firmware's Mali GPU is hardware revision **r1p0**. Buildroot's default Mali package ships DDK **r0p0**. The user-space `libmali.so` must match the kernel-side ABI exactly — a version mismatch causes EGL initialisation to fail at startup, producing a black screen or an immediate crash.
+
+The fix is to discard the Buildroot-compiled EGL/GLES stubs and symlink them directly to the device's native driver:
+
+```bash
+# Symlink bundled EGL/GLES to device's native Mali r1p0 driver
+cd /media/az01-internal/mixxx/lib
+rm -f libEGL.so libGLESv2.so libGLESv1_CM.so
+ln -sf /usr/lib/libmali.so.14.0 libEGL.so
+ln -sf /usr/lib/libmali.so.14.0 libGLESv2.so
+ln -sf /usr/lib/libmali.so.14.0 libGLESv1_CM.so
+```
+
+The device's `libmali.so.14.0` is `libmali-r1p0.so` selected at boot by `/sbin/az01-libmali-setup`, which reads the GPU hardware revision from `/sys/devices/platform/ffa30000.gpu/gpuinfo` and bind-mounts the correct variant. All three EGL/GLES entry-point libraries in the SD card bundle should be symlinks pointing to this path.
+
+## Why SD Card Qt 5.15.8 (Not Device Qt 5.15.2)
+
+The device ships Qt 5.15.2 at `/usr/qt/lib`. It uses the `eglfs_emu` platform integration, which is designed for emulated environments and cannot take over the display from `fbcon`. When used for MIXXX, it produces a permanent black screen.
+
+The SD card carries Qt 5.15.8 compiled from the same Buildroot environment as MIXXX, with a custom-built `libqeglfs-mali-integration.so` (14 KB) placed at:
+
+```
+qt-plugins/egldeviceintegrations/libqeglfs-mali-integration.so
+```
+
+This plugin implements the `eglfs_mali` integration, which correctly initialises the Mali GPU, acquires the DRM plane, and takes over framebuffer rendering. It is the single component that makes display output possible.
+
+Device Qt 5.15.2 is still included in `LD_LIBRARY_PATH` as a fallback (listed after the SD bundle, before system libs) for any Qt component not bundled on the card.
+
+## Required Environment Variables
+
+All display-related variables are set by `mixxx_launcher.sh` before MIXXX is exec'd:
+
+| Variable | Value | Purpose |
+|---|---|---|
+| `LD_LIBRARY_PATH` | `$BUNDLE/lib:/usr/qt/lib:/usr/lib` | SD Qt 5.15.8 first; device Qt 5.15.2 fallback; system libs last |
+| `QT_PLUGIN_PATH` | `$BUNDLE/qt-plugins` | Points to the SD card's plugin directory containing `eglfs_mali` |
+| `QT_QPA_PLATFORM` | `eglfs` | Full-screen EGLFS compositor — no X11 or Wayland on this device |
+| `QT_QPA_EGLFS_INTEGRATION` | `eglfs_mali` | Selects the custom Mali integration plugin |
+| `QT_QPA_EGLFS_ROTATION` | `90` (Prime Go) / `270` (Prime 4) | Rotates Qt's logical screen to match the display controller |
+| `QT_QPA_FONTDIR` | `/usr/share/fonts` | System fonts from device rootfs (not bundled on SD card) |
+| `QT_QPA_GENERIC_PLUGINS` | `evdevtouch:/dev/input/event0,evdevkeyboard:/dev/input/event1` | Touchscreen and keyboard input |
+| `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS` | `/dev/input/event0:rotate=90` | Maps ILI2117 physical coordinates to Qt's logical 1280×800 screen |
+| `HOME` | `/tmp` | MIXXX config/cache in tmpfs; not `/root` |
+| `QT_QPA_EGLFS_PHYSICAL_WIDTH` | `155` | Physical screen width in mm (Prime Go 5″ display) |
+| `QT_QPA_EGLFS_PHYSICAL_HEIGHT` | `98` | Physical screen height in mm |
+
+## Touchscreen Mapping
+
+The ILI2117 sensor reports coordinates in the physical landscape orientation of the device (the way you hold it). Qt's `evdevtouch` plugin must rotate those coordinates to match Qt's logical 1280×800 screen. The `rotate=90` parameter in `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS` performs this mapping.
+
+The display rotation and the touchscreen rotation **must match**. A mismatch causes touch events to land at incorrect positions relative to what is visible on screen (rotated, mirrored, or inverted).
+
+## KMS/DRM
+
+The GPU drives the built-in display via `/dev/dri/card0`. The DRM connector is reported as "connected" and the Mali integration plugin outputs through the hardware overlay plane. `fbcon` may still hold DRM plane-4 at boot, but the Mali EGLFS integration acquires a separate overlay plane and renders there, so `fbcon`'s plane does not interfere with MIXXX's output.
+
+## GPU Performance Governor
+
+The TKGL bootstrap module sets the GPU to `performance` mode before MIXXX launches, matching what Engine OS does at startup:
+
+```bash
+echo performance > /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/governor
+
+cat /sys/devices/platform/ffa30000.gpu/gpuinfo
+```
+
+Running at the `ondemand` governor causes visible frame rate drops during waveform scrolling because the GPU clock ramps up too slowly after idle periods.
+
+## Prime 4 Differences
+
+The Prime 4 uses a DSI-1 display connector rather than the LVDS-1 connector on the Prime Go. Both devices share the same Mali-T76x r1p0 GPU, Rockchip RK3288 SoC, and 800×1280 portrait framebuffer, but the DSI-1 controller applies rotation in the opposite direction and introduces a vsync issue.
+
+### Display Hardware
+
+| Property | Prime Go | Prime 4 |
+|---|---|---|
+| Connector | LVDS-1 | DSI-1 |
+| DRM sysfs path | `card0-LVDS-1` | `card0-DSI-1` |
+| Framebuffer driver | `rockchipdrmfb` | `rockchipdrmfb` |
+| Native resolution | 800×1280 portrait | 800×1280 portrait |
+| Screen tearing | Not observed | Present without vsync |
+
+### Rotation
+
+| Setting | Prime Go (LVDS-1) | Prime 4 (DSI-1) |
+|---|---|---|
+| `QT_QPA_EGLFS_ROTATION` | **90** | **270** |
+| `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS` rotate | **90** | **270** |
+
+All four rotation values (0, 90, 180, 270) were tested on the Prime 4. Only 270 produced the correct orientation. The DSI-1 controller applies rotation in the opposite direction compared to LVDS-1.
+
+### Screen Tearing Fix (Prime 4)
+
+The DSI-1 DRM path handles page-flip timing differently from LVDS-1 and exhibits visible tearing by default. Enable vsync:
+
+```bash
+export QT_QPA_EGLFS_SWAPINTERVAL=1
+```
+
+This setting is **not** needed on Prime Go (LVDS-1), which syncs correctly without it.
+
+### Device Auto-Detection
+
+The launcher detects the device model by checking the DRM connector status:
+
+```sh
+if [ -f /sys/class/drm/card0-DSI-1/status ] && \
+   grep -q connected /sys/class/drm/card0-DSI-1/status 2>/dev/null; then
+    DEVICE="primego"
+    ROTATION=90
+    SWAPINTERVAL=0
+else
+    DEVICE="prime4"
+    ROTATION=270
+    SWAPINTERVAL=1
+fi
+```
+
+## Warnings and Known Issues
+
+<Warning>
+Do **not** set `QT_QPA_EGLFS_KMS_ATOMIC=1`. This flag enables the DRM atomic modesetting path, which conflicts with the Mali integration plugin and breaks display output. It is not needed for Mali-T76x and must remain unset.
+</Warning>
+
+<Warning>
+Only `lib/bin/mixxx` (the ~10 MB stripped binary) works with EGLFS. The `mixxx.real` binary (~17 MB, unstripped) crashes immediately with `EGLFS: OpenGL windows cannot be mixed with others`. The `bin/mixxx` symlink must point to `../lib/bin/mixxx` — do not change it to point to `mixxx.real`.
+</Warning>
+
+<Note>
+`nodialog.so` is present at `lib/nodialog.so` in the SD card bundle and can be used as an `LD_PRELOAD` to suppress Qt dialog boxes in other launcher configurations. It is **not** used in the default TKGL bootstrap launcher path. Do not add it to `LD_PRELOAD` unless you are troubleshooting a secondary launcher.
+</Note>
+
+## Startup Display Stall
+
+MIXXX takes approximately 5 seconds after the process starts before anything appears on screen. This is not a crash or a hang — it is the Mali GPU initialising the EGLFS context and painting all Qt widgets to the framebuffer for the first time. The 60% CPU usage visible during this period is normal Mali rendering activity. If the screen remains black after 15 seconds, that indicates an EGL initialisation failure, most likely from a DDK mismatch or a missing `eglfs_mali` plugin.

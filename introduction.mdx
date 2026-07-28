@@ -1,0 +1,64 @@
+---
+title: "primemixxx: MIXXX on Denon Prime DJ Hardware"
+sidebarTitle: "Introduction"
+description: "primemixxx runs open-source MIXXX DJ software on Denon Prime Go and Prime 4 hardware via a non-destructive SD card — no firmware modification needed."
+---
+
+primemixxx puts [MIXXX](https://mixxx.org) — the free, open-source DJ software — on your Denon DJ Prime Go or Prime 4 hardware without touching the stock Engine OS. Drop an SD card in, reboot, and MIXXX launches automatically. Pull the SD card out and the device returns to Engine OS as if nothing happened. No firmware flashing, no permanent modification, no warranty risk.
+
+## What It Is
+
+The Denon Prime Go and Prime 4 share the same Rockchip RK3288 ARMv7 SoC that powers a stripped-down Buildroot Linux environment under Engine OS. primemixxx exploits that open Linux substrate to run a real MIXXX binary — cross-compiled for ARMv7 via Buildroot 2021.02.10, bundled with its own Qt 5.15.8 and Mali EGLFS stack, and launched from the SD card through the TKGL Bootstrap framework.
+
+The result is a fully functional two-deck DJ environment on the device's 7-inch multitouch display, with all hardware controls (platters, faders, pads, encoders, crossfader) mapped to MIXXX via internal USB MIDI, and a PREEMPT_RT kernel delivering **5.8 ms (256/512) ALSA buffer** with `SCHED_FIFO` priority 98 audio threads.
+
+<Note>
+**Prime 4 support is partial.** MIXXX boots and audio/MIDI work, but the Prime 4's DSI-1 display causes a GPU crash on EGL initialization, so the device currently runs in offscreen mode. Native display support requires further investigation. The Prime Go is fully verified.
+</Note>
+
+## Key Facts
+
+| Fact | Detail |
+|---|---|
+| **SoC** | Rockchip RK3288 ARMv7 (Cortex-A17, 4 cores) |
+| **GPU** | Mali-T76x (4 cores, r1p0 0x0750) |
+| **Kernel** | `6.1.111-inmusic-2024-09-19-rt41` with `PREEMPT_RT` |
+| **Audio latency** | 5.8 ms (256/512 ALSA buffer, `SCHED_FIFO` 98) |
+| **Display** | 7-inch touchscreen, 1280×800 landscape |
+| **Installation** | Non-destructive SD card boot — coexists with Engine OS |
+| **Fork origin** | Based on [@ghuntley/denon-prime4](https://github.com/ghuntley/denon-prime4) firmware research |
+
+## Architecture Overview
+
+primemixxx is built from four interlocking layers:
+
+**TKGL Bootstrap** is a modular, boot-time script-execution framework that lives on the SD card. At startup, the device's `engine.service` runs a thin delegation stub on internal storage that hands control to TKGL on the SD card. TKGL mounts USB drives, restores the library database, configures the GPU governor, and launches MIXXX as a transient systemd unit (`mixxx-app.service`). Because the stub on internal storage just delegates, removing the SD card reverts the device cleanly to Engine OS on next boot.
+
+**Buildroot cross-compile** produces a self-contained MIXXX bundle: the ARMv7 binary, 66+ shared libraries, a custom-built Qt 5.15.8 with an EGLFS Mali integration plugin, ALSA, codec support, and MIDI controller mappings — all packed into a ~25 MB SD card tarball distributed via GitHub Releases.
+
+**Custom Mali EGLFS** works around a DDK version mismatch between Buildroot's default Mali r0p0 and the device's hardware Mali r1p0. The bundle symlinks its `libEGL.so` and `libGLESv2.so` directly to the device's native `/usr/lib/libmali.so.14.0`, and uses a custom-compiled `libqeglfs-mali-integration.so` that can take over the display from `fbcon` — something the stock device Qt 5.15.2 cannot do.
+
+**CPU shielding** isolates MIXXX's audio threads on CPU cores 2–3 at `SCHED_FIFO` priority 98, while all non-audio threads (Mali GPU, touchscreen, Qt thread pool, CachingReader) are banished to cores 0–1 at `SCHED_OTHER`. IRQ affinity pins all non-audio IRQs to CPU 0 at boot. This, combined with BFQ → `none` I/O scheduler tuning and filesystem `noatime` mounts, achieves stable 5.8 ms playback even under load.
+
+## Why This Project Exists
+
+Engine OS is polished hardware-specific firmware, but it is closed, cannot be extended, and its feature set is fixed by Denon's release cadence. MIXXX is open-source, actively developed, and supports a vast plugin and effects ecosystem — but it has no official ARM hardware target. The Denon Prime series runs Linux on hardware powerful enough to run MIXXX well. primemixxx bridges the gap: you get MIXXX's full feature set (effects chains, BPM sync, loop rolls, sampler) on hardware that already fits in a backpack, without giving up Engine OS for gigs that need it.
+
+The project is a fork of [@ghuntley/denon-prime4](https://github.com/ghuntley/denon-prime4), which performed the original firmware extraction and SoC research. This fork extends that work with a tuned RT environment, CPU shielding, per-thread affinity pinning, I/O scheduler optimization, and a distributable SD card bundle that requires no compilation by end users.
+
+## Explore the Docs
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install MIXXX on your Prime Go or Prime 4 in four steps — no compiling required.
+  </Card>
+  <Card title="Devices" icon="microchip" href="/devices">
+    Hardware compatibility, SoC specs, display details, and known limitations per device.
+  </Card>
+  <Card title="Build Guide" icon="hammer" href="/guides/build">
+    Cross-compile MIXXX for ARMv7 using Buildroot and assemble a distributable SD card bundle.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Deep dive into the boot chain, TKGL Bootstrap, Mali EGLFS stack, and CPU shielding strategy.
+  </Card>
+</CardGroup>

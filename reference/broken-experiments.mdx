@@ -1,0 +1,87 @@
+---
+title: "Broken Experiments and Dead Ends"
+sidebarTitle: "Dead Ends"
+description: "Approaches that were tried and failed in primemixxx development — documented to prevent repeating them: Qt downgrade, eglfs_mali rotation, SSH firmware, and others."
+---
+
+This page documents approaches that were attempted during primemixxx development and definitively did not work. Each entry explains what was tried, why it failed, and — where applicable — what replaced it or what the open path forward looks like.
+
+<Note>
+These experiments are preserved here so future contributors don't waste time repeating them. If you think you've found a way to make one of these work, check the reasoning below carefully before proceeding.
+</Note>
+
+---
+
+<Accordion title="Qt 5.15.2 Downgrade → Reverted">
+
+**What was attempted**: Downgrade the Buildroot Qt version from 5.15.8 to 5.15.2 to match the device's native runtime Qt version, with the goal of eliminating ABI mismatch between the bundled Qt and the device's `/usr/qt/lib`.
+
+**Why it failed**: Qt 5.15.2 is incompatible with GCC 16 (the host compiler on the build machine). Multiple Qt modules produced build errors due to C++17/C++20 standards changes introduced between GCC versions.
+
+**Resolution**: Reverted to Qt 5.15.8 in Buildroot. The bundle was simplified so that MIXXX uses the device's native Qt 5.15.2 libraries at runtime via `LD_LIBRARY_PATH` — device Qt at `/usr/qt/lib` is added as a fallback after the SD bundle but before system libs. The build machine's GCC 16 is fully compatible with Qt 5.15.8.
+
+**Commit**: `a2aab70 fix: revert Qt 5.15.2 downgrade, simplify bundle, fix mixxx.service`
+
+</Accordion>
+
+<Accordion title="eglfs_mali Rotation → Blocked">
+
+**What was attempted**: Use the Mali GPU's native `eglfs_mali` Qt platform integration (`QT_QPA_EGLFS_INTEGRATION=eglfs_mali`) for automatic screen rotation handling. The Prime Go's display controller outputs a portrait framebuffer at 800×1280 and rotates it to 1280×800 landscape. The goal was to have Qt handle this rotation transparently.
+
+**Why it failed**: Two separate blockers were hit:
+
+1. After applying the OpenGL-skip widget fix (backport of MIXXX PR #15874), `eglfs_mali` crashes on startup.
+2. Mali's `orientation()` / `nativeOrientation()` functions **ignore `QT_QPA_EGLFS_ROTATION`** entirely — every rotation value produces the same 90°-off output. The environment variable has no effect on the Mali fbdev compositor.
+
+**Rejected approach**: `QT_QPA_EGLFS_ROTATION` (any value) — confirmed ineffective on this hardware.
+
+**How Engine DJ handles this**: Engine DJ does not use Qt EGLFS rotation at all. Instead, it uses `QPainter::rotate` / `QTransform` internally, with `AIR_SCREEN_ROTATION=270` sourced from the device tree. This is an application-level rotation approach, not a platform-level one.
+
+**Current status**: Blocked. Two possible paths forward:
+
+1. Fix the `eglfs_mali` startup crash — enable Qt EGL logging (`QT_LOGGING_RULES=qt.qpa.egl*=true`) to identify the failure point
+2. Implement a `QGraphicsView` / `QTransform` rotation wrapper around the MIXXX central widget, mirroring Engine DJ's approach
+
+**Session reference**: `9cd6dae7` — Deploy MIXXX onto Denon Prime Go
+
+</Accordion>
+
+<Accordion title="SSH Disabled in Custom Firmware → Blocker">
+
+**What was attempted**: Flash the custom MIXXX firmware image (`PRIMEGO-4.3.4-Update.img.dtb`) to the device over USB. The expectation was that SSH would be available after flashing for further debugging and iteration.
+
+**Why it failed**: After a successful flash (device pings OK, boots cleanly), port 22 is refused. The `sshd.service` is not enabled in the Buildroot defconfig — either `BR2_PACKAGE_OPENSSH` is missing or the sshd service was not added to the rootfs overlay startup scripts.
+
+**Impact**: No SSH access after flashing custom firmware. The only recovery path is to reflash the stock-with-SSH firmware (`PRIMEGO-4.3.4-STOCK-SSH-Update.img`).
+
+**Resolution needed**: Check `jp11_defconfig` for OpenSSH / sshd enablement; add `sshd.service` to the rootfs overlay; rebuild. Until this is fixed, always develop against the stock-with-SSH image.
+
+**Session reference**: `c1fae510` — Recovered Plan
+
+</Accordion>
+
+<Accordion title="primego-v3.dts (Original) → Superseded">
+
+**What was attempted**: Use the original `primego-v3.dts` device tree source, which references the unmodified stock firmware rootfs at `unpacked-img/JP11/splash.img.xz`.
+
+**Why it was superseded**: The original v3 DTS does not include SSH access or USB Ethernet gadget support. Without SSH, on-device debugging is impossible — there is no serial console accessible to developers.
+
+**Replacement**: `primego-v3-fixed.dts`, which references `unpacked-ssh-img/stock-tkgl.img.xz` — a stripped stock rootfs with an SSH authorized key pre-installed and the USB Ethernet gadget (RNDIS) enabled. This is the DTS used to produce `PRIMEGO-4.3.4-STOCK-SSH-Update.img`.
+
+</Accordion>
+
+<Accordion title="updater Binary in Git → Removed">
+
+**What was attempted**: Commit the compiled `updater` Go binary (ELF x86-64, ~15 MB) directly to the repository alongside the source code for convenience.
+
+**Why it was removed**: Compiled binaries do not belong in git. They bloat the repository, become stale silently, and cannot be meaningfully diffed or reviewed. The source is in `go/cmd/updater/` and `go/pkg/fastboot/` — rebuild it with `cd go && go build ./cmd/updater/`.
+
+</Accordion>
+
+<Accordion title="COPILOT_HISTORY.md → Removed">
+
+**What was attempted**: Maintain a raw Copilot CLI command history log (`COPILOT_HISTORY.md`) in the repository root as a context preservation mechanism.
+
+**Why it was removed**: The file contained no structured information — only raw user prompts in sequence. Session context is preserved in `.copilot/session-state/` directories and in git commit history, both of which are more useful and auditable. The raw history log was replaced by proper git commit history with descriptive messages.
+
+</Accordion>

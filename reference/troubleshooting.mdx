@@ -1,0 +1,289 @@
+---
+title: "Troubleshooting primemixxx on Denon Prime Hardware"
+sidebarTitle: "Troubleshooting"
+description: "Solutions for common issues: SSH connectivity, MIXXX segfaults, Mali DDK mismatch, EGLFS crashes, audio xruns, and WiFi drops."
+---
+
+This page covers the most common issues encountered when deploying and running primemixxx on Denon Prime Go and Prime 4 hardware. Issues are grouped by symptom. For failed experiments and dead-end approaches, see [Broken Experiments](/reference/broken-experiments).
+
+---
+
+## Critical Pitfalls
+
+Before diving into individual issues, review these ten critical rules. Violating any of them causes hard-to-diagnose failures:
+
+1. **Never delete `.midi.xml` files** — a missing mapping causes the MIXXX skin to render only a toolbar with no decks or library.
+2. **Only `lib/bin/mixxx` works** — `mixxx.real` crashes with an EGLFS error. `bin/mixxx` must symlink to `../lib/bin/mixxx`.
+3. **Mali DDK must be r1p0** — bundle's `libEGL.so`/`libGLESv2.so` must symlink to the device's native `libmali.so.14.0`, not the Buildroot r0p0 default.
+4. **Bundle must NOT contain system libs** — `libc.so.6`, `libm.so.6`, `libpthread.so.0`, `libdl.so.2`, `librt.so.1`, `libstdc++.so.6`, `libgcc_s.so.1`, `ld-linux-armhf.so.3`, `libatomic.so.1` must come from the device's `/lib`.
+5. **Restart MIXXX correctly** — `systemctl restart mixxx-app.service` silently fails. Use `stop` + `restart engine.service`.
+6. **Don't use `print()` in MIDI JS** — it is silent on device. Use `console.warn()` or `engine.log()`.
+7. **WiFi drops after ~30s** — use a keepalive ping or the USB Ethernet gadget at `192.168.42.1`.
+8. **Audio latency** — use `latency=5` in `soundconfig.xml`; `latency=4` causes xruns.
+9. **USB music library needs seeding** — MIXXX won't scan USB music unless the `directories` table in the SQLite DB has an entry.
+10. **Repo is always source of truth** — commit locally first, then deploy. Never edit files directly on the device without updating the repo.
+
+---
+
+## Connectivity
+
+<Accordion title="Can't SSH to device">
+
+**Check WiFi network**: Ensure the development machine and Prime Go are on the same WiFi network. The device advertises via mDNS as `primego.local`.
+
+**Use USB Ethernet gadget**: Connect a USB-C cable between the device and computer. The device appears at the fixed address `192.168.42.1` — no network configuration required, no dropout risk.
+
+```bash
+ssh root@192.168.42.1   # password: denonprime4
+```
+
+**WiFi keepalive**: WiFi SSH sessions drop after ~30 seconds of silence. Run a keepalive ping in a separate terminal:
+
+```bash
+ping -i 25 <device-ip> > /dev/null &
+```
+
+Alternatively, install `99-wifi-power-save.rules` via the device services installer — it permanently disables WiFi power save on the device.
+
+</Accordion>
+
+<Accordion title="WiFi power save causing SSH drops">
+
+Disable WiFi power save manually. This setting is **not persistent** across reboots:
+
+```bash
+iw dev wlan0 set power_save off
+```
+
+For a persistent fix, install the udev rule:
+
+```bash
+DEVICE_IP=<ip> ./scripts/dev-install-device-services.sh
+```
+
+This installs `99-wifi-power-save.rules`, which runs `iw dev wlan0 set power_save off` automatically whenever `wlan0` comes up.
+
+</Accordion>
+
+---
+
+## MIXXX Crashes
+
+<Accordion title="MIXXX segfaults (exit code 139 / signal 11)">
+
+<Warning>
+Segfaults on startup almost always indicate a library conflict. Check all three causes below before rebooting or reflashing.
+</Warning>
+
+**Cause 1 — System libs in bundle**: The bundle must NOT include these libraries — they must come from the device's `/lib`:
+
+- `libc.so.6`
+- `libm.so.6`
+- `libpthread.so.0`
+- `libdl.so.2`
+- `librt.so.1`
+- `libstdc++.so.6`
+- `libgcc_s.so.1`
+- `ld-linux-armhf.so.3`
+- `libatomic.so.1`
+
+Remove them from the bundle with `scripts/dev-fix-device-libs.sh`.
+
+**Cause 2 — Mali DDK mismatch**: See the dedicated accordion below.
+
+**Cause 3 — Wrong binary**: See the EGLFS crash accordion below.
+
+</Accordion>
+
+<Accordion title="Mali DDK mismatch — 'r1p0 vs r0p0'">
+
+The error message `DDK is not compatible... r1p0 vs r0p0` means the bundled EGL/GLES libraries were built against Mali DDK r0p0 (Buildroot default), but the device's kernel driver is r1p0. The fix is to symlink the bundle's EGL libraries to the device's native Mali library:
+
+```bash
+cd $BUNDLE/lib
+rm -f libEGL.so libGLESv2.so libGLESv1_CM.so
+ln -sf /usr/lib/libmali.so.14.0 libEGL.so
+ln -sf /usr/lib/libmali.so.14.0 libGLESv2.so
+ln -sf /usr/lib/libmali.so.14.0 libGLESv1_CM.so
+```
+
+Verify the GPU revision before debugging further:
+
+```bash
+cat /sys/devices/platform/ffa30000.gpu/gpuinfo
+# expected: r1p0 0x0750
+```
+
+</Accordion>
+
+<Accordion title="EGLFS crash — 'OpenGL windows cannot be mixed with others'">
+
+This crash occurs when using the wrong MIXXX binary. Buildroot produces two outputs:
+
+| Binary | Size | Works? |
+|:---|:---:|:---:|
+| `lib/bin/mixxx` | ~10 MB (stripped) | ✅ Yes |
+| `mixxx.real` | ~17 MB (unstripped) | ❌ No |
+
+`bin/mixxx` must be a symlink pointing to `../lib/bin/mixxx`:
+
+```bash
+ls -la bin/mixxx
+# Expected: bin/mixxx -> ../lib/bin/mixxx
+# If it points to ../mixxx.real — fix it:
+ln -sf ../lib/bin/mixxx bin/mixxx
+```
+
+</Accordion>
+
+<Accordion title="Prime 4 DSI display segfault">
+
+The Prime 4 uses a DSI-1 display (not LVDS-1 like the Prime Go). MIXXX may segfault during EGL initialization due to DDK/DSI incompatibility with the native display.
+
+Use `-platform offscreen` to verify the binary itself is functional before troubleshooting the display:
+
+```bash
+/media/az01-internal/mixxx/lib/bin/mixxx -platform offscreen
+```
+
+If MIXXX runs without crashing in offscreen mode, the binary is healthy and the issue is display-specific. Native Prime 4 display support requires further investigation.
+
+</Accordion>
+
+---
+
+## MIXXX Service
+
+<Accordion title="MIXXX doesn't start after reboot">
+
+<Warning>
+If `mixxx-app.service` is masked, MIXXX will never start — not even after correct restarts.
+</Warning>
+
+Check the service state:
+
+```bash
+systemctl status mixxx-app.service
+```
+
+If the service is masked, unmask it:
+
+```bash
+systemctl unmask mixxx-app.service
+```
+
+Then follow the correct restart sequence below.
+
+</Accordion>
+
+<Accordion title="MIXXX won't restart / restarts silently fail">
+
+<Warning>
+`systemctl restart mixxx-app.service` **silently fails**. The TKGL bootstrap script checks whether `mixxx-app.service` is already active and skips relaunch if so. The unit may appear active even if MIXXX has exited.
+</Warning>
+
+The only correct restart sequence is:
+
+```bash
+# 1. Stop the transient unit first
+systemctl stop mixxx-app.service
+
+# 2. Trigger TKGL to recreate it
+systemctl restart engine.service
+```
+
+**Do NOT use any of these** — they will silently fail to restart MIXXX:
+
+- `systemctl restart mixxx-app.service` — TKGL sees the unit as running and skips
+- `pkill mixxx` + `systemctl restart engine.service` — orphaned unit stays "active", TKGL skips
+- `kill -9 <pid>` — same problem as pkill
+
+</Accordion>
+
+---
+
+## Audio
+
+<Accordion title="Audio xruns at latency=4">
+
+At `latency=4` the audio engine produces xruns (buffer underruns) on Prime Go hardware. Increase the latency setting in `soundconfig.xml`:
+
+```xml
+<latency>5</latency>
+```
+
+This is the minimum stable value on this hardware given the `SCHED_FIFO` priority setup and CPU shielding in place. Latency 4 is insufficient even with PREEMPT_RT.
+
+</Accordion>
+
+---
+
+## Music Library
+
+<Accordion title="USB music library empty / won't scan">
+
+MIXXX requires the `directories` table in the SQLite database to have at least one entry before it will scan for music. Check the current state:
+
+```bash
+sqlite3 /media/az01-internal/mixxx/settings/mixxxdb.sqlite \
+  "SELECT directory FROM directories;"
+```
+
+If the output is empty, insert the music directory:
+
+```bash
+sqlite3 /media/az01-internal/mixxx/settings/mixxxdb.sqlite \
+  "INSERT INTO directories (id, directory, volume) VALUES (1, '/media/az01-internal/mixxx/music', 1);"
+```
+
+Then restart MIXXX and trigger a library scan from the UI. The seed database (`scripts/dev-collect-mixxx-bundle.sh`) pre-populates this entry — if it is missing, the seed was not applied correctly.
+
+</Accordion>
+
+---
+
+## Skin and Display
+
+<Accordion title="Skin only shows toolbar — no decks, waveforms, or library">
+
+<Warning>
+This is caused by a missing MIDI mapping file. MIXXX skips controller initialization entirely when the mapping file cannot be found, and the skin renders only the top toolbar.
+</Warning>
+
+Check which mapping file `mixxx.cfg` references:
+
+```bash
+grep -A2 '\[ControllerPreset\]' /media/az01-internal/mixxx/settings/mixxx.cfg
+```
+
+Then verify the file exists at that path:
+
+```bash
+ls -la /media/az01-internal/mixxx/settings/controllers/Denon-Prime-Go.midi.xml
+```
+
+If it is missing, restore it from the `mixxx-mapping/` directory in the bundle and restart MIXXX.
+
+</Accordion>
+
+---
+
+## MIDI Mapping Development
+
+<Accordion title="debug print() is silent on device">
+
+`print()` statements in MIDI mapping JavaScript are silently dropped on the device — output does not appear in logs or the terminal.
+
+Use these alternatives instead:
+
+```javascript
+// Visible in MIXXX log output
+console.warn("debug value:", myVar);
+
+// Routed through MIXXX's engine logger
+engine.log("debug value: " + myVar);
+```
+
+Both methods produce output that can be captured via `journalctl -u mixxx-app.service -f`.
+
+</Accordion>

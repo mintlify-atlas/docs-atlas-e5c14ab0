@@ -1,0 +1,259 @@
+---
+title: "SD Card Layout and Bundle Structure"
+sidebarTitle: "SD Card"
+description: "Reference for the SD card directory structure, MIXXX bundle contents, launcher script, and the USB music library setup for primemixxx."
+---
+
+The primemixxx SD card is a microSD formatted as ext4 with label `TKGL_BOOTSTRAP`. It contains everything MIXXX needs to run — the binary, Qt 5.15.8 libraries, audio codecs, MIDI mappings, settings, and the launcher script. The device's internal eMMC is never modified at runtime; removing the SD card and rebooting restores stock Engine OS.
+
+## SD Card Identity
+
+| Property | Value |
+|---|---|
+| **Label** | `TKGL_BOOTSTRAP` |
+| **Filesystem** | ext4 |
+| **Mount point** | `/media/az01-internal` (internal SD slot, managed by `edisksd`) |
+| **Activation** | `echo external > /sys/bus/platform/devices/sd-mux/state` |
+| **MIXXX bundle root** | `/media/az01-internal/mixxx/` (`$BUNDLE`) |
+
+## Directory Structure
+
+The MIXXX bundle lives at `/media/az01-internal/mixxx/`. Everything MIXXX needs at runtime — libraries, plugins, mappings, and settings — is self-contained here.
+
+```
+/media/az01-internal/mixxx/
+├── mixxx.real                        # 17 MB binary — DO NOT USE (causes EGLFS crash)
+├── bin/
+│   └── mixxx -> ../lib/bin/mixxx     # Symlink to working 10 MB binary
+├── lib/
+│   ├── bin/
+│   │   └── mixxx                     # MIXXX 2.5.6 ARMv7 (~10 MB, working binary)
+│   ├── libQt5*.so.5                  # Qt 5.15.8 (bundled — device's 5.15.2 not used)
+│   ├── libEGL.so -> /usr/lib/libmali.so.14.0   # Mali r1p0 shim
+│   ├── libGLESv2.so -> /usr/lib/libmali.so.14.0
+│   ├── libasound.so.2                # ALSA
+│   ├── libportaudio.so.2             # Audio I/O
+│   ├── libFLAC.so.12                 # Codec
+│   ├── libmp3lame.so.0               # MP3 codec
+│   ├── librubberband.so.2            # Time stretching
+│   ├── libkeyfinder.so.2             # Key detection
+│   ├── libchromaprint.so.1           # BPM detection
+│   └── ...                           # 66+ total shared libraries
+├── qt-plugins/
+│   ├── platforms/
+│   │   └── libqeglfs.so              # EGLFS platform plugin
+│   ├── egldeviceintegrations/
+│   │   └── libqeglfs-mali-integration.so  # Custom Mali integration (critical)
+│   ├── generic/
+│   │   └── libqevdevtouchplugin.so   # Touchscreen input
+│   ├── imageformats/                 # SVG, ICO support
+│   ├── sqldrivers/
+│   │   └── libqsqlite.so             # SQLite for MIXXX library DB
+│   └── platformthemes/
+├── mixxx-mapping/                    # MIDI controller mappings (source reference)
+│   ├── Denon-Prime-4*.xml
+│   ├── Denon-Prime-4*-scripts.js
+│   └── prime-go/
+│       ├── Denon-Prime-Go*.xml
+│       └── Denon-Prime-Go*-scripts.js
+├── mixxx_launcher.sh                 # SD card launcher (env vars + CPU shielding)
+├── settings/                         # MIXXX runtime settings
+│   ├── mixxx.cfg
+│   └── mixxxdb.sqlite                # Library database
+├── share/
+│   └── mixxx/                        # Resource path (skins, translations)
+├── music/                            # USB music library mount point
+└── backup/                           # Device binary backup
+```
+
+<Warning>
+  **Two MIXXX binaries exist — only one works.** `lib/bin/mixxx` (~10 MB, stripped) is the working binary. `mixxx.real` (~17 MB, unstripped) crashes immediately with:
+
+  ```
+  EGLFS: OpenGL windows cannot be mixed with others
+  ```
+
+  The `bin/mixxx` symlink **must** point to `../lib/bin/mixxx`. Never redirect it to `../mixxx.real`. Verify the symlink target with:
+
+  ```bash
+  ls -la /media/az01-internal/mixxx/bin/mixxx
+  # Should print: bin/mixxx -> ../lib/bin/mixxx
+  ```
+</Warning>
+
+## Launcher Script
+
+The launcher at `mixxx_launcher.sh` is the real entry point for MIXXX. A thin delegator on internal storage (`/data/mixxx/mixxx`) calls it:
+
+```sh
+#!/bin/sh
+# TKGL entry point on internal eMMC — delegates to SD card
+exec /media/az01-internal/mixxx/mixxx_launcher.sh "$@"
+```
+
+The full SD card launcher sets environment variables, mounts the USB music library, and applies CPU shielding after launch:
+
+```sh
+#!/bin/sh
+# MIXXX Launcher — Denon Prime Go (SD card)
+BUNDLE=/media/az01-internal/mixxx
+MUSIC_DIR="$BUNDLE/music"
+
+# USB Music Library: mount USB drive to music directory if present
+mount_usb_music() {
+    [ -d "$MUSIC_DIR" ] || mkdir -p "$MUSIC_DIR"
+    mountpoint -q "$MUSIC_DIR" && return 0
+    for dev in /dev/sda1 /dev/sdb1; do
+        if [ -b "$dev" ]; then
+            mount -o ro "$dev" "$MUSIC_DIR" 2>/dev/null && return 0
+        fi
+    done
+    return 1
+}
+mount_usb_music
+
+export LD_PRELOAD=$BUNDLE/lib/no_hid_poll.so
+export QT_PLUGIN_PATH="$BUNDLE/qt-plugins"
+export LD_LIBRARY_PATH="$BUNDLE/lib:/usr/qt/lib:/usr/lib"
+export QT_QPA_PLATFORM=eglfs
+export QT_QPA_EGLFS_INTEGRATION=eglfs_mali
+export QT_QPA_EGLFS_ROTATION=90
+export QT_QPA_FONTDIR=/usr/share/fonts
+export QT_QPA_GENERIC_PLUGINS=evdevtouch:/dev/input/event0,evdevkeyboard:/dev/input/event1
+export QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=/dev/input/event0:rotate=90
+export QT_QPA_EGLFS_PHYSICAL_WIDTH=155
+export QT_QPA_EGLFS_PHYSICAL_HEIGHT=98
+export HOME=/tmp
+export XDG_RUNTIME_DIR=/tmp
+
+# Launch at SCHED_OTHER on cores 2-3 — do NOT use SCHED_FIFO on the main
+# process; all 44+ child threads (Mali GPU, CachingReader, Qt pool, etc.)
+# would inherit RT priority and compete with the audio engine.
+taskset -c 2,3 $BUNDLE/bin/mixxx \
+  -platform eglfs \
+  --settingsPath $BUNDLE/settings \
+  --resourcePath $BUNDLE "$@" &
+MIXPID=$!
+
+# Post-launch: selectively boost audio-critical threads, banish everything else
+BANISH="mali-|CachingReader|QEvdevTouch|StatsManager|QDBus|VinylControl|\
+LibraryScanner|BrowseThread|AnalyzerThread|Controller$|VSync|gmain|gdbus|\
+Thread \(pooled\)|QQuickPixmapRea|QQmlThread"
+
+for i in $(seq 1 12); do
+    sleep 1
+    for tid in $(ls /proc/$MIXPID/task/ 2>/dev/null); do
+        name=$(cat /proc/$MIXPID/task/$tid/comm 2>/dev/null)
+        case "$name" in EngineWorkerSch|EngineSideChain)
+            chrt -f -p 98 $tid 2>/dev/null
+            taskset -p 0x0C $tid 2>/dev/null ;; esac
+        if echo "$name" | grep -qE "$BANISH"; then
+            chrt -o -p 0 $tid 2>/dev/null
+            taskset -p 0x03 $tid 2>/dev/null
+        fi
+    done
+done
+# Main thread: low RT for MIDI/UI responsiveness, stays on audio cores
+chrt -f -p 1 $MIXPID 2>/dev/null
+taskset -p 0x0C $MIXPID 2>/dev/null
+
+wait $MIXPID
+```
+
+## Key Environment Variables
+
+| Variable | Value | Purpose |
+|---|---|---|
+| `LD_LIBRARY_PATH` | `$BUNDLE/lib:/usr/qt/lib:/usr/lib` | Bundle libs first, then device Qt 5.15.2 fallback, then system |
+| `QT_PLUGIN_PATH` | `$BUNDLE/qt-plugins` | Qt 5.15.8 plugins (EGLFS Mali integration) |
+| `QT_QPA_PLATFORM` | `eglfs` | Framebuffer display, no X11/Wayland |
+| `QT_QPA_EGLFS_INTEGRATION` | `eglfs_mali` | Custom Mali integration plugin (critical for display) |
+| `QT_QPA_EGLFS_ROTATION` | `90` | Logical screen is 1280×800 landscape; GPU framebuffer is 800×1280 portrait |
+| `QT_QPA_GENERIC_PLUGINS` | `evdevtouch:/dev/input/event0,evdevkeyboard:/dev/input/event1` | Touchscreen and keyboard input |
+| `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS` | `rotate=90` | Maps ILI2117 physical coordinates to Qt's rotated coordinate system |
+| `LD_PRELOAD` | `$BUNDLE/lib/no_hid_poll.so` | Skips hidraw udev scan (kernel 6.1.111 never sends NLMSG_DONE) |
+| `HOME` | `/tmp` | Avoids writing to `/root` on read-only rootfs |
+| `XDG_RUNTIME_DIR` | `/tmp` | Required by Qt/D-Bus on embedded systems |
+
+## Audio Optimization Stack
+
+| Layer | Configuration |
+|---|---|
+| **Audio threads** | `EngineWorkerSch` + `EngineSideChain` at `SCHED_FIFO` 98, pinned to cores 2-3 |
+| **Main thread** | `SCHED_FIFO` 1, cores 2-3 (low RT for MIDI/UI responsiveness) |
+| **Non-audio threads** | `SCHED_OTHER`, banished to cores 0-1 (Mali GPU, CachingReader, Qt pool, GLib, etc.) |
+| **RT throttling** | Disabled (`sched_rt_runtime_us=-1`) |
+| **IRQ affinity** | All non-audio IRQs (GPU, USB, MMC) pinned to CPU 0 at boot |
+| **ALSA device** | `hw:JP11,0` — direct, no `plughw` software conversion |
+| **ALSA format** | S32_LE, 4 channels, 44100 Hz, `latency=5` (period 1024 = 23.2ms) |
+| **I/O scheduler** | BFQ → `none` on both MMC blocks; read-ahead 512 KB; `nr_requests` 64 |
+| **VM tuning** | `dirty_background_bytes=20MB`, `swappiness=1`, `vfs_cache_pressure=200` |
+| **Filesystem** | All ext4 mounts with `noatime,nodiratime,commit=60` |
+
+## USB MP3 Library Setup
+
+MIXXX's sandbox silently blocks vfat filesystems, which means a USB drive formatted as FAT32 will mount successfully but MIXXX will not scan it. The solution is to bind-mount the USB device to an ext4-backed path that MIXXX trusts.
+
+The launcher's `mount_usb_music()` function handles this automatically — it mounts `/dev/sda1` or `/dev/sdb1` (read-only) to `$BUNDLE/music/`. MIXXX then scans that path as a normal ext4 directory.
+
+### Library Directories: SQLite, Not mixxx.cfg
+
+<Note>
+  Music library paths are stored in the `directories` table of `mixxxdb.sqlite`, **not** in `mixxx.cfg`. The `[Recording] Directory` key in `mixxx.cfg` controls only the recording save path, not the music library. `RescanOnStartup=1` does nothing if the `directories` table is empty.
+</Note>
+
+To check whether the library directory is registered:
+
+```sql
+sqlite3 /media/az01-internal/mixxx/settings/mixxxdb.sqlite \
+  "SELECT directory FROM directories;"
+```
+
+If the query returns nothing, insert the path manually:
+
+```sql
+sqlite3 /media/az01-internal/mixxx/settings/mixxxdb.sqlite \
+  "INSERT INTO directories (id, directory, volume) VALUES (1, '/media/az01-internal/mixxx/music', 1);"
+```
+
+After inserting, set `RescanOnStartup=1` in `mixxx.cfg`, restart MIXXX once to trigger the scan, then set it back to `0`.
+
+### mixxx.cfg Reference
+
+```ini
+[Config]
+FirstRun=1
+HasScreenedForLibraryDir=1
+
+[Library]
+Directory[0]=/media/az01-internal/mixxx/music
+RescanOnStartup=0
+```
+
+## System Libraries NOT on the SD Card
+
+These nine libraries are provided by the device's own `/lib` and must never appear in `mixxx-bundle/lib/`. Bundling them causes a kernel ABI mismatch that produces `SIGABRT` or `SIGSEGV` at launch.
+
+| Library | Role |
+|---|---|
+| `libc.so.6` | C standard library |
+| `libm.so.6` | Math library |
+| `libpthread.so.0` | POSIX threads |
+| `libdl.so.2` | Dynamic linker |
+| `librt.so.1` | POSIX real-time extensions |
+| `libstdc++.so.6` | C++ standard library |
+| `libgcc_s.so.1` | GCC runtime |
+| `ld-linux-armhf.so.3` | Dynamic linker/loader |
+| `libatomic.so.1` | GCC atomic operations |
+
+Run `scripts/dev-fix-device-libs.sh` after `dev-collect-mixxx-bundle.sh` to remove these automatically.
+
+## Deployment Scripts Summary
+
+| Script | Purpose |
+|---|---|
+| `scripts/dev-collect-mixxx-bundle.sh` | Gather MIXXX + deps from Buildroot output into `mixxx-bundle/` |
+| `scripts/dev-fix-device-libs.sh` | Remove system-critical libs from the deployed bundle on device |
+| `scripts/dev-deploy-to-device.sh` | SCP bundle to device, install services, back up SD card |
+| `scripts/dev-quick-fix-deploy.sh` | Redeploy only changed files for fast iteration |
+| `scripts/dev-create-sdcard-bundle.sh` | Assemble complete SD card tarball for distribution |

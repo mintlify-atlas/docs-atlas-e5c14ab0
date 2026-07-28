@@ -1,0 +1,249 @@
+---
+title: "Prime Go MIDI Mapping Reference for MIXXX"
+sidebarTitle: "MIDI Mapping"
+description: "Complete MIDI channel and control reference for the Denon Prime Go mapping in MIXXX, including note numbers, CC assignments, and LED protocols."
+---
+
+The Denon Prime Go exposes all physical controls — platters, faders, pads, buttons, and encoders — as an internal USB MIDI device. The authoritative source for the hardware's MIDI layout is the Engine OS QML file at `/usr/Engine/AssignmentFiles/PresetAssignmentFiles/JP11/JP11_Controller_Assignments.qml` on the device. The MIXXX mapping files `Denon-Prime-Go.midi.xml` and `Denon-Prime-Go-scripts.js` must match these channel, note, and CC assignments exactly.
+
+<Note>
+Engine OS QML files use **0-indexed** MIDI channels (0 = channel 1). MIXXX uses the standard 1-indexed status byte convention (`0x90` = channel 1, Note On). When comparing the QML source against MIXXX XML entries, add 1 to the QML channel index to get the MIXXX channel number.
+</Note>
+
+<Warning>
+Never delete `.midi.xml` files during cleanup. If the file referenced by `[ControllerPreset]` in `mixxx.cfg` is missing, MIXXX skips controller initialization entirely and the skin renders only a toolbar — decks, waveforms, and the library are all hidden.
+</Warning>
+
+## Channel Layout
+
+| MIDI Channel | QML Index | Purpose |
+|:---:|:---:|:---|
+| 1 | 0 | Mixer Channel 1 (PFL, EQ, fader, sweep FX) |
+| 2 | 1 | Mixer Channel 2 (PFL, EQ, fader, sweep FX) |
+| 3 | 2 | Left Deck (transport, pads, jog, tempo) |
+| 4 | 3 | Right Deck (transport, pads, jog, tempo) |
+| 5 | 4 | DJ FX (select, time, wet/dry, activate) |
+| 16 | 15 | Global (back, forward, browse, view, shift, load) |
+
+---
+
+## Left Deck — MIDI Channel 3
+
+Note On status byte: `0x92` — Note Off: `0x82`
+
+### Notes
+
+| Control | Note (dec) | Note (hex) | Notes |
+|---|:---:|:---:|:---|
+| Load | 1 | `0x01` | |
+| Sync | 8 | `0x08` | Hold = KeySync |
+| Cue | 9 | `0x09` | Shift = Set Cue Point |
+| Play | 10 | `0x0A` | |
+| Pad Mode CUES | 11 | `0x0B` | Alt = STEMS |
+| Pad Mode LOOPS | 12 | `0x0C` | Alt = AUTO |
+| Pad Mode ROLL | 13 | `0x0D` | Shift = SAMPLER |
+| Action Pads 1–8 | 15–22 | `0x0F`–`0x16` | 8 velocity-sensitive pads |
+| Pitch Bend − | 29 | `0x1D` | |
+| Pitch Bend + | 30 | `0x1E` | |
+| Jog Touch | 33 | `0x21` | |
+| Vinyl | 35 | `0x23` | Hold = GridCueEdit, Shift = SlipMode |
+| AutoLoop Push | 39 | `0x27` | Shift = IncreaseBeatJumpSize |
+
+### CCs
+
+| Control | CC (hex) | Notes |
+|---|:---:|:---|
+| Tempo Slider Upper | `0x1F` | Inverted |
+| Tempo Slider Lower | `0x4B` | |
+| AutoLoop Turn | `0x20` | Shift = BeatJump |
+| Jog Wheel MSB | `0x37` | Upper 7 bits of 14-bit position |
+| Jog Wheel LSB | `0x4D` | Lower 7 bits of 14-bit position |
+
+---
+
+## Right Deck — MIDI Channel 4
+
+Note On status byte: `0x93` — Note Off: `0x83`
+
+Same note and CC layout as the Left Deck, with one exception:
+
+| Control | Note (dec) | Note (hex) |
+|---|:---:|:---:|
+| Load | 2 | `0x02` |
+
+All other notes and CCs are identical to the Left Deck table above.
+
+---
+
+## Mixer Channel 1 — MIDI Channel 1
+
+Note On status byte: `0x90` — Note Off: `0x80`
+
+| Control | Type | Value (hex) |
+|---|:---:|:---:|
+| PFL (Cue Monitor) | Note | `0x0D` |
+| Sweep FX Select 1 | Note | `0x0E` |
+| Sweep FX Select 2 | Note | `0x0F` |
+| Trim (Gain) | CC | `0x03` |
+| Treble (High EQ) | CC | `0x04` |
+| Mid EQ | CC | `0x06` |
+| Bass (Low EQ) | CC | `0x08` |
+| Sweep FX Knob | CC | `0x0B` |
+| Channel Fader | CC | `0x0E` |
+| VU Meter (output) | CC | `0x20` |
+
+---
+
+## Mixer Channel 2 — MIDI Channel 2
+
+Note On status byte: `0x91` — Note Off: `0x81`
+
+Same layout as Mixer Channel 1. VU Meter output uses CC `0x21` instead of `0x20`.
+
+---
+
+## DJ FX — MIDI Channel 5
+
+Note On status byte: `0x94`
+
+| Control | Type | Value (hex) |
+|---|:---:|:---:|
+| FX Activate | Note | `0x06` |
+| FX Select Push | Note | `0x07` |
+| FX Time Push | Note | `0x08` |
+| FX Select Touch | Note | `0x09` |
+| FX Assign 1 | Note | `0x0B` |
+| FX Assign 2 | Note | `0x0C` |
+| FX Wet/Dry | CC | `0x04` |
+| FX Select Turn | CC | `0x21` |
+| FX Time Turn | CC | `0x22` |
+
+---
+
+## Global — MIDI Channel 16
+
+Note On status byte: `0x9F` — Note Off: `0x8F`
+
+| Control | Type | Value (hex) | Notes |
+|---|:---:|:---:|:---|
+| Back | Note | `0x03` | |
+| Forward | Note | `0x04` | Shift = Quantize |
+| Browse Encoder Push | Note | `0x06` | |
+| View | Note | `0x07` | Hold = ControlCenter, Shift = SwitchLayout |
+| Shift | Note | `0x08` | |
+| Eject/Source | Note | `0x14` | Shift = Source select |
+| Browse Encoder Turn | CC | `0x05` | Shift = 15-step scroll |
+| Cue Mix | CC | `0x0C` | |
+| Cue Gain | CC | `0x0D` | |
+| Crossfader | CC | `0x0E` | |
+
+### Mic Controls (Global channel)
+
+| Control | Note (hex) |
+|---|:---:|
+| Mic 1 | `0x24` |
+| Mic 2 | `0x25` |
+
+---
+
+## Jog Wheel Details
+
+Each deck exposes the jog wheel across three messages on its deck MIDI channel:
+
+| Signal | Type | Value (hex) | Purpose |
+|---|:---:|:---:|:---|
+| Jog Touch | Note | `0x21` | Triggers `engine.scratchEnable()` |
+| Jog Wheel MSB | CC | `0x37` | Upper 7 bits of 14-bit position |
+| Jog Wheel LSB | CC | `0x4D` | Lower 7 bits of 14-bit position |
+
+The wheel position is a 14-bit value assembled from MSB + LSB. Touch requires **both** an active touch note (`isPress()`) **and** `vinylMode === true`. The default value of `_vinylMode` is `true`. The Vinyl button (Note `0x23`) edge-detects transitions from 0 → 127 to toggle vinyl mode on/off.
+
+---
+
+## LED Protocols
+
+### SysEx RGB (`LedType.RGB`)
+
+Used for pad buttons (Action Pads `0x0F`–`0x16`) and pad mode buttons (HotCue/Loop/Roll mode keys).
+
+```
+F0 00 02 0B 7F 0C 03 00 05 <ch> <idx> <r> <g> <b> F7
+```
+
+- `<ch>` and `<idx>` are the MIDI channel and note index in hex
+- `<r>`, `<g>`, `<b>` are 7-bit (0–127) gamma-corrected color values
+- Gamma: **3.5** (same value used for both pad and non-pad controls)
+- Color calculation: `Math.floor(Math.pow(c, gamma) * 127)` where `c` is a normalized 0–1 float
+
+```javascript
+const sendSysexRGB = function(channel, control, red, green, blue) {
+    const msg = [0xf0, 0x00, 0x02, 0x0b, 0x7f, 0x0C, 0x03, 0x00, 0x05,
+                 channel, control, red, green, blue, 0xf7];
+    midi.sendSysexMsg(msg, msg.length);
+};
+```
+
+### Simple Note On/Off (`LedType.Simple`)
+
+Used for transport buttons (Play, Cue, Load), navigation (Back, Forward, Browse, View, Shift), PFL, AutoLoop, and Vinyl.
+
+```
+Note On:  9<ch> <idx> <vel>    (vel > 0 → LED on, color = velocity)
+Note Off: 8<ch> <idx> 00       (vel = 0 → LED fully off)
+```
+
+The velocity byte doubles as a color selector from the device's 7-bit hardware palette.
+
+#### Known Working Simple LED Color Values
+
+| Value | Color / Effect | Used For |
+|:---:|:---|:---|
+| `0x00` | Fully off | Cue off, Play off, PFL off |
+| `0x01` | Very dim glow | Load (empty slot) |
+| `0x02` | Subtle dim | Back, Forward (always lit) |
+| `0x09` | Dim yellow | Shift off |
+| `0x0C` | Green | Play on, Load (track loaded) |
+| `0x1A` | Amber / orange | Cue on |
+| `0x20` | Bright green | Sync on |
+| `0x40` | Red | Vinyl on |
+| `1`–`8` | Deck colors | PFL on (`colDeck = [1, 5]`, `colDeckDark = [4, 6]`) |
+
+### Device Init SysEx Messages
+
+These messages are sent on controller connection to initialize the hardware:
+
+```
+F0 00 02 0B 7F 0C 60 00 04 04 01 01 04 F7   (device initialization)
+F0 00 02 0B 7F 0C 04 00 00 F7               (query absolute controls)
+F0 00 02 0B 7F 0C 42 00 00 F7               (request power-on button state)
+F0 7E 00 06 01 F7                           (MIDI device inquiry)
+```
+
+---
+
+## All Known SysEx Messages
+
+| Name | Message |
+|:---|:---|
+| RGB LED color | `F0 00 02 0B 7F 0C 03 00 05 <ch> <idx> <r> <g> <b> F7` |
+| Device initialization | `F0 00 02 0B 7F 0C 60 00 04 04 01 01 04 F7` |
+| Query absolute controls | `F0 00 02 0B 7F 0C 04 00 00 F7` |
+| Request power-on state | `F0 00 02 0B 7F 0C 42 00 00 F7` |
+| MIDI device inquiry | `F0 7E 00 06 01 F7` |
+
+Active Sense messages (every 300ms) are forwarded to the `f_midi` virtual device for Serato loopback compatibility.
+
+---
+
+## Known Issues
+
+| Issue | Status | Notes |
+|:---|:---:|:---|
+| PFL left always on | ✅ Fixed | `output()` sends `0x00` (Note Off) instead of dim green |
+| Vinyl rapid toggle | ✅ Fixed | Edge detection: `_lastVinylState`, only 0→127 triggers |
+| Cue LED | ✅ Fixed | Simple Note On (`0x1A`) works |
+| Play LED | ✅ Fixed | Simple Note On (`0x0C`) works |
+| `scratch2_enable` Channel0 error | ✅ Fixed | Removed `outKey` from vinyl button |
+| Pad / hotcue LEDs | ❌ Broken | Only update on pad mode switch, not on track load |
+| Jog touch error | ❌ Open | `vinylMode` may be `false`; needs debug |
+| Load / Back / Fwd LEDs | ❌ Open | Still use SysEx or no output — need Simple |

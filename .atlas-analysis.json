@@ -1,0 +1,83 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "primemixxx",
+  "projectDescription": "Run MIXXX open-source DJ software on Denon DJ Prime Go and Prime 4 hardware via a non-destructive SD card boot that coexists with the stock Engine OS.",
+  "theme": "aspen",
+  "primaryColor": "#ab5c47",
+  "lightColor": "#313133",
+  "darkColor": "#c2c4c5",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "devices"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/build",
+              "guides/deploy",
+              "guides/sd-card",
+              "guides/switching"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/boot-chain",
+              "architecture/cpu-shielding",
+              "architecture/display",
+              "architecture/audio"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/midi-mapping",
+              "reference/hardware",
+              "reference/firmware",
+              "reference/troubleshooting",
+              "reference/broken-experiments"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Non-destructive SD card boot — remove card to return to stock Engine OS instantly",
+    "PREEMPT_RT kernel with <5ms audio latency (5.8ms ALSA buffer verified on Prime Go)",
+    "Per-thread CPU shielding — audio engine threads pinned to dedicated ARM cores 2-3",
+    "Full MIDI mapping for Prime Go and Prime 4 (platters, faders, pads, jog wheels, LEDs)",
+    "TKGL Bootstrap modular framework for SD card hook injection",
+    "USB music library auto-mount with sandbox bypass",
+    "Custom Qt 5.15.8 EGLFS Mali integration for touchscreen display",
+    "Go-based cross-platform firmware updater with fastboot support",
+    "Dual-device support: Prime Go (verified) and Prime 4 (offscreen mode)"
+  ],
+  "publicApiSurface": [
+    "scripts/dev-deploy-to-device.sh — deploy MIXXX bundle to device via SCP",
+    "scripts/dev-collect-mixxx-bundle.sh — gather MIXXX + deps from Buildroot output",
+    "scripts/dev-fix-device-libs.sh — strip system-critical libs from deployed bundle",
+    "scripts/dev-quick-fix-deploy.sh — fast partial redeploy for iteration",
+    "scripts/dev-install-device-services.sh — install systemd services on device",
+    "install-device.sh — one-time TKGL bootstrap hook installer (runs on device)",
+    "uninstall-device.sh — remove TKGL hook and restore stock Engine OS",
+    "switch-to-mixxx — runtime switch from Engine OS to MIXXX",
+    "switch-to-engine — runtime switch from MIXXX to Engine OS",
+    "go/cmd/updater — cross-platform firmware flasher (Go CLI + UI)",
+    "go/cmd/find_update — find and identify firmware update files",
+    "Makefile targets: unpack, clone-buildroot, compile-buildroot, pack, dist",
+    "mixxx_launcher.sh — SD card launcher with env vars + CPU shielding",
+    "tkgl_bootstrap — SD card bootstrap entry point script",
+    "Denon-Prime-Go.midi.xml + Denon-Prime-Go-scripts.js — Prime Go MIDI mapping",
+    "Denon-Prime-4.midi.xml + Denon-Prime-4-scripts.js — Prime 4 MIDI mapping"
+  ]
+}

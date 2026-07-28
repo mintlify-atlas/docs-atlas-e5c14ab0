@@ -1,0 +1,136 @@
+---
+title: "Deploy MIXXX to Denon Prime via SSH"
+sidebarTitle: "Deploy"
+description: "Use the developer deploy scripts to push the MIXXX bundle to your device over SSH, install systemd services, and keep the device in sync with the repo."
+---
+
+The developer deploy workflow uses SCP and SSH to push the compiled MIXXX bundle from your build machine to the Denon Prime Go or Prime 4 over the network. The device is reachable via a USB Ethernet gadget or WiFi, and the entire deployment — including an automatic SD card backup — runs from a single script.
+
+<Warning>
+  **The repo is always the source of truth.** Every change must exist in both the local repo and on the device — they must never diverge.
+
+  - Commit locally first, then deploy to the device.
+  - Never edit files directly on the device without updating the repo.
+  - Never commit without deploying.
+
+  If you edit `mixxx_launcher.sh` on the device and forget to commit it, the next `dev-deploy-to-device.sh` run will overwrite your changes.
+</Warning>
+
+## Prerequisites
+
+1. **SSH access** to the device (see connectivity table below).
+2. **MIXXX compiled** — run `./scripts/dev-collect-mixxx-bundle.sh` first to produce `mixxx-bundle/`.
+3. **`sshpass` installed** on your build machine (optional but recommended — without it you will be prompted for the password on each SCP/SSH call):
+   ```bash
+   sudo apt install sshpass
+   ```
+
+## Device Connectivity
+
+<Tip>
+  Use USB Ethernet (`192.168.42.1`) for large file transfers and long debugging sessions. Connect a USB-C cable from your computer to the device — the USB Ethernet gadget auto-starts at boot and gives a stable, drop-free connection with no keepalive needed.
+</Tip>
+
+| Method | Address | Notes |
+|---|---|---|
+| **USB Ethernet (RNDIS)** | `192.168.42.1` | Preferred for SCP / long sessions. Needs `usb-gadget-eth.service` installed. |
+| **WiFi (mDNS)** | `primego.local` | Convenient for quick commands. |
+| **WiFi (static/DHCP)** | Set `DEVICE_IP` env var | Find the IP on your router or from device shell. |
+| **Password** | `denonprime4` | Used for both SSH and SCP. |
+
+WiFi SSH connections drop after approximately 30 seconds of silence. To keep a session alive during a long deploy, run a keepalive ping in a separate terminal:
+
+```bash
+ping -i 25 <device-ip> > /dev/null &
+```
+
+## Quick Start Deploy Flow
+
+```bash
+# 1. Collect MIXXX + all dependencies from Buildroot output
+./scripts/dev-collect-mixxx-bundle.sh
+
+# 2. Deploy bundle to device (backs up SD card, copies files, installs services)
+DEVICE_IP=primego.local ./scripts/dev-deploy-to-device.sh
+
+# 3. Switch to MIXXX
+ssh root@primego.local switch-to-mixxx
+
+# 4. Switch back to Engine OS
+ssh root@primego.local switch-to-engine
+```
+
+You can also target the USB Ethernet address directly:
+
+```bash
+DEVICE_IP=192.168.42.1 ./scripts/dev-deploy-to-device.sh
+```
+
+## What Gets Deployed
+
+Everything lives on the SD card — nothing is written to the device's internal eMMC storage during a normal deploy.
+
+| Path on SD card | Contents |
+|---|---|
+| `tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/lib/bin/mixxx` | MIXXX 2.5.6 ARMv7 binary (~10 MB, working) |
+| `tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/bin/mixxx` | Symlink → `../lib/bin/mixxx` |
+| `tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/lib/` | 66+ shared libraries (Qt 5.15.8, ALSA, codecs) |
+| `tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/qt-plugins/` | Qt 5.15.8 EGLFS platform + image + SQL plugins |
+| `tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/mixxx-mapping/` | MIDI controller mappings (Prime Go + Prime 4) |
+| `tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/mixxx_launcher.sh` | Launcher: env vars, Mali fix, CPU shielding |
+| `tkgl_bootstrap_DenonPrimeGO/modules/mod_mixxx/` | TKGL module — launches MIXXX via `systemd-run` |
+| `tkgl_bootstrap_DenonPrimeGO/scripts/tkgl_bootstrap` | Bootstrap entry point |
+
+## SD Card Backup
+
+`dev-deploy-to-device.sh` automatically backs up key directories from `/media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/` on the device before overwriting anything. The backup is saved locally to:
+
+```
+sdcard-backup-YYYYMMDD-HHMMSS/
+```
+
+The backup captures `controllers/`, `skins/`, `settings/`, and `mixxx_launcher.sh` — the files most likely to have been modified on-device. Large binary directories (`lib/`, `bin/`) are excluded to keep the backup fast.
+
+## Device Services
+
+`scripts/dev-install-device-services.sh` is called automatically by `dev-deploy-to-device.sh`, but can also be run standalone to repair or reinstall services without redeploying the full MIXXX bundle:
+
+```bash
+DEVICE_IP=<ip> ./scripts/dev-install-device-services.sh
+```
+
+| Service | Purpose | Auto-start |
+|---|---|---|
+| `usb-gadget-eth.service` | USB Ethernet gadget (RNDIS) — SSH via USB cable | Yes (boot) |
+| `fix-mdns.service` | Fixes mDNS hostname to `primego.local` | Yes (boot, oneshot) |
+| `powerbutton-monitor.service` | Graceful shutdown on power button press | No (MIXXX sessions only) |
+| `99-usb-automount.rules` | Auto-mount USB drives for music library | Yes (udev) |
+| `99-wifi-power-save.rules` | Disable WiFi power save to prevent SSH drops | Yes (udev) |
+
+## Boot Verification
+
+After deploying and switching to MIXXX, verify the process is running correctly:
+
+```bash
+# Check MIXXX process is alive
+ssh root@<ip> 'ps | grep mixxx'
+
+# Check systemd unit status
+ssh root@<ip> 'systemctl status mixxx-app.service'
+
+# Confirm SD card is mounted
+ssh root@<ip> 'mount | grep TKGL_BOOTSTRAP'
+```
+
+## Important Paths on Device
+
+| Path | Purpose |
+|---|---|
+| `/media/az01-internal/` | SD card mount point |
+| `/media/TKGL_BOOTSTRAP/` | TKGL SD card root |
+| `/data/` | Internal eMMC storage |
+| `/data/mixxx/mixxx` | Thin delegator script (points to SD card launcher) |
+| `/etc/systemd/system/engine.service` | Modified engine service (TKGL stub) |
+| `/etc/systemd/system/engine.service.orig` | Backup of original Engine OS service |
+| `/usr/bin/switch-to-mixxx` | SSH-accessible switcher command |
+| `/usr/bin/switch-to-engine` | SSH-accessible switcher command |

@@ -1,0 +1,168 @@
+---
+title: "Audio Architecture: ALSA Routing Through XMOS to AKM DAC"
+sidebarTitle: "Audio"
+description: "How MIXXX routes audio via direct ALSA to the XMOS XS1-U6A controller and AKM AK4621 CODEC on Denon Prime hardware, bypassing PulseAudio."
+---
+
+Denon Prime hardware does not use the RK3288's built-in audio interfaces for DJ output. Instead, the SoC hands off digital audio over an internal USB 2.0 bus to a dedicated XMOS USB audio controller, which feeds professional-grade AKM converters. MIXXX targets these converters directly through ALSA, with no intermediate audio server in the path.
+
+## Hardware Signal Chain
+
+```
+Rockchip RK3288 (CPU/mixer)
+  → ALSA (kernel audio subsystem)
+    → USB 2.0 (internal bus)
+      → XMOS XS1-U6A-64-FB96 (USB audio controller)
+        → AKM AK4621 CODEC (main I/O: master out, booth, headphone)
+        → AKM AK4413 DAC (secondary channels)
+```
+
+The RK3288 does not perform any analog conversion. All DAC operations happen inside the AKM chips downstream of the XMOS controller. This means CPU load from MIXXX's audio engine has no direct impact on analog output quality — the XMOS controller handles USB isochronous transfers independently.
+
+## Why Direct ALSA
+
+Engine OS is a stripped-down Buildroot Linux environment with no PulseAudio, JACK, or PipeWire installed. The only audio infrastructure present is `alsa-utils` version 1.2.4. MIXXX's ALSA backend communicates directly with the kernel's ALSA layer, which maps to the XMOS USB audio device via the `snd-usb-audio` kernel module. There is no intermediate daemon to configure, no session management, and no permission model beyond the running user's access to `/dev/snd/*`.
+
+## Sound Cards on Prime Go
+
+```
+card 0 [Surface] : USB-Audio - PRIME GO Control Surface
+                   Denon DJ PRIME GO Control Surface at usb-ff540000.usb-1, full speed
+card 1 [JP11]    : JP11 - JP11
+                   JP11
+```
+
+There are two ALSA cards exposed by the hardware:
+
+<CardGroup cols={2}>
+  <Card title="Card 0: Surface (USB Control Surface)" icon="sliders">
+    Handles MIDI/HID communication with the hardware controls: jog wheels, faders, buttons, pads, and encoders. **Not for audio output.** Configuring MIXXX to output to card 0 will produce silence.
+  </Card>
+  <Card title="Card 1: JP11 (XMOS Audio Interface)" icon="volume-high">
+    The main XMOS audio interface connected to the AK4621 CODEC and AK4413 DAC. This is the correct target for all MIXXX audio output. Use `hw:1,0` or the named form `hw:JP11,0`.
+  </Card>
+</CardGroup>
+
+## ALSA Diagnostic Commands
+
+```bash
+# List all sound cards
+cat /proc/asound/cards
+aplay -l
+aplay -L
+
+# List PCM devices for the JP11 audio interface
+aplay -D hw:JP11 --list-pcms
+
+# Test audio output (verify connections before a gig — watch your volume)
+speaker-test -D hw:JP11 -c 2 -t sine -f 440
+
+# Inspect ALSA mixer controls for the JP11 card
+amixer -c JP11 contents
+amixer -c JP11 controls
+```
+
+## Releasing ALSA Hardware Locks
+
+Engine OS's DJ application ("Planck") takes exclusive control of the ALSA interfaces at boot. MIXXX cannot open the JP11 ALSA device while Engine OS holds the lock. The TKGL bootstrap module handles this automatically by calling `systemctl stop engine` before launching MIXXX. If you are launching MIXXX manually (for debugging or from a switcher script), you must release the lock first:
+
+```bash
+systemctl stop engine
+```
+
+Attempting to open `hw:JP11,0` while Engine OS is running will result in a `Device or resource busy` error from ALSA.
+
+## Pre-Configured soundconfig.xml
+
+MIXXX normally enumerates all available ALSA PCM devices via PortAudio before presenting the audio preferences dialog. On Prime hardware, this enumeration can be slow or problematic (see the PortAudio NDEBUG section below). Providing a `soundconfig.xml` file causes MIXXX to skip enumeration and open the specified device directly:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<SoundManagerConfig>
+  <SoundDevice name="JP11: PCM inmusic,jp11-audio-codec-0 (hw:1,0)" api="ALSA">
+    <output_channels>4</output_channels>
+    <sample_rate>44100</sample_rate>
+  </SoundDevice>
+</SoundManagerConfig>
+```
+
+Place this file at `/media/az01-internal/mixxx/settings/soundconfig.xml`. The `--settingsPath` argument in the launcher points MIXXX to this directory, so no additional configuration is needed.
+
+## ALSA Buffer Tuning
+
+Buffer size is the primary lever for latency. Smaller buffers reduce latency but increase the risk of xruns (buffer underruns) when the CPU is briefly unavailable to the audio callback.
+
+| Parameter | Value | Derived latency |
+|---|---|---|
+| Device | `hw:JP11,0` | Direct hardware, no software conversion |
+| Format | `S32_LE` | 32-bit signed little-endian |
+| Channels | 4 | Main L/R + booth/headphone |
+| Sample rate | 44100 Hz | — |
+| `latency` setting | `5` | — |
+| `period_size` | 1024 frames | **23.2 ms** per callback |
+| `buffer_size` | 2048 frames | **46.4 ms** total ring buffer |
+
+<Warning>
+Setting `latency=4` (period_size=512, 11.6 ms per period) causes regular xruns when the Mali GPU is active. GPU DMA bursts create brief memory bus stalls that the 11.6 ms period cannot absorb. Use `latency=5` (period_size=1024) as the minimum safe value on this hardware.
+
+If `soundconfig.xml` contains `latency="4"`, MIXXX will report `period_size=512` — double the buffer to 1024 to resolve xruns.
+</Warning>
+
+## PortAudio NDEBUG Fix
+
+The Buildroot PortAudio package (`V19.7.0-devel`) is compiled without the `NDEBUG` preprocessor define, leaving all C `assert()` calls active in the release binary. During ALSA device enumeration, PortAudio's `GropeDevice()` function probes plugin PCMs on the JP11 hardware. Some of these PCMs report 0 channels, triggering:
+
+```
+assert(maxChans > 0) → SIGABRT → crash
+```
+
+This crash happens inside `pa_linux_alsa.c` before MIXXX has finished initialising.
+
+<Note>
+**Fix:** Add `-DNDEBUG` to PortAudio's `CFLAGS` in `package/portaudio/portaudio.mk` via a post-configure hook. This disables all assertions at compile time.
+
+The complete modified file is available at `patches/portaudio-ndebug.mk` in the repository. Apply it during the Buildroot compile step, not on the device.
+
+**Verification:** A standalone test binary (`minipa_arm`, built from `test/minipa.c`) calls `Pa_Initialize()` + `Pa_GetDeviceCount()` and confirms:
+- 4 ALSA devices found (no crash)
+- JP11 device: `PCM inmusic,jp11-audio-codec-0 (hw:1,0)` — 2 inputs, 4 outputs
+
+If the NDEBUG patch is not applied, `Pa_Initialize()` crashes before returning and MIXXX never reaches its main window.
+</Note>
+
+## Verification Checklist
+
+Run these checks after any audio configuration change to confirm the full chain is working:
+
+<Steps>
+  <Step title="Confirm cards are present">
+    ```bash
+    cat /proc/asound/cards
+    ```
+    Expect to see card 0 (Surface) and card 1 (JP11).
+  </Step>
+  <Step title="Confirm Engine OS is stopped">
+    ```bash
+    systemctl is-active engine
+    ```
+    Should return `inactive`. If active, run `systemctl stop engine`.
+  </Step>
+  <Step title="Test ALSA output directly">
+    ```bash
+    speaker-test -D hw:JP11 -c 2 -t sine -f 440
+    ```
+    You should hear a 440 Hz sine wave on the main outputs.
+  </Step>
+  <Step title="Verify soundconfig.xml path">
+    ```bash
+    cat /media/az01-internal/mixxx/settings/soundconfig.xml
+    ```
+    Confirm the device name matches `JP11: PCM inmusic,jp11-audio-codec-0 (hw:1,0)`.
+  </Step>
+  <Step title="Check MIXXX settings path in launcher">
+    ```bash
+    grep settingsPath /media/az01-internal/mixxx/mixxx_launcher.sh
+    ```
+    Confirm `--settingsPath` points to the same directory as `soundconfig.xml`.
+  </Step>
+</Steps>

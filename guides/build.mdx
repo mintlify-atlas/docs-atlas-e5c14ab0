@@ -1,0 +1,151 @@
+---
+title: "Build MIXXX from Source for Denon Prime Hardware"
+sidebarTitle: "Build from Source"
+description: "Cross-compile MIXXX for ARMv7 using Buildroot 2021.02.10, then pack the result into a firmware image or distributable SD card bundle."
+---
+
+Building primemixxx from source produces a self-contained ARMv7 bundle of MIXXX 2.5.6 and all its dependencies — Qt 5.15.8, ALSA, audio codecs, and MIDI libraries — ready to be deployed to the SD card on your Denon Prime Go or Prime 4.
+
+## Prerequisites
+
+Before running any build script, install the following on your build machine:
+
+- **u-boot tools** — for `mkimage` (packs firmware `.dtb`)
+- **7-zip** — for unpacking the original firmware archive
+- **QEMU ARM user-mode + binfmt** — allows running ARMv7 binaries natively on x86 during the build
+- **Base development packages** — `build-essential`, `git`, `wget`, `cpio`, `file`, `unzip`, `rsync`, `bc`
+- **Buildroot 2021.02.10** — cloned by `clone-buildroot.sh` (see Step 2 below)
+
+See the [Buildroot system requirements](https://buildroot.org/downloads/manual/manual.html#requirement) for the full list of host packages.
+
+## Makefile Targets
+
+The top-level `Makefile` delegates to shell scripts. All targets are `.PHONY` and can be run with `make <target>` or directly as `./<script>.sh`.
+
+| Target | Script | Purpose |
+|---|---|---|
+| `unpack` | `./unpack.sh` | Download and unpack original Denon firmware |
+| `clone-buildroot` | `./clone-buildroot.sh` | Clone Buildroot 2021.02.10 into `buildroot/` |
+| `compile-buildroot` | `./compile-buildroot.sh` | Build toolchain + all packages (requires sudo for loopback mount) |
+| `configure-buildroot` | `./configure-buildroot.sh` | Apply primemixxx defconfig to Buildroot |
+| `pack` | `./pack.sh` | Pack modified rootfs images into a firmware `.dtb` |
+| `dist` | `./dist.sh` | Produce a distributable SD card tarball |
+| `generate-updater-win` | `./generate-updater-win.sh` | Build original Windows updater tool |
+| `generate-new-updater-win` | `./generate-new-updater-win.sh` | Build cross-platform Go updater (requires Go 1.22+) |
+| `generate-package-ignorelist` | `./generate-package-ignorelist.sh` | Regenerate the package ignore list for firmware packing |
+| `unpack-updater` | `./unpack-updater.sh` | Unpack a firmware `.img` using the updater tool |
+
+## Build Pipeline
+
+<Steps>
+  <Step title="Unpack original firmware">
+    Download and unpack the original Denon firmware. This extracts the device tree source (`.dts`) and compressed rootfs images that primemixxx modifies.
+
+    ```bash
+    ./unpack.sh
+    ```
+  </Step>
+
+  <Step title="Clone Buildroot">
+    Clone the exact Buildroot version used by this project. Using a different version will cause toolchain or package incompatibilities.
+
+    ```bash
+    ./clone-buildroot.sh
+    ```
+  </Step>
+
+  <Step title="Build toolchain and packages">
+    Run the full Buildroot compilation. This compiles the ARMv7 cross-toolchain, MIXXX, Qt 5.15.8, all audio libraries, and every other package in the defconfig. Plan for 1–4 hours on first run.
+
+    ```bash
+    ./compile-buildroot.sh
+    ```
+
+    <Note>
+      `compile-buildroot.sh` requires `sudo` to set up loopback mounts when packing the rootfs image. The script only escalates for that specific step — the rest runs as your normal user.
+    </Note>
+  </Step>
+
+  <Step title="Pack firmware image">
+    Pack the modified rootfs and device tree back into a flashable firmware `.dtb`. The output is `PRIMEGO-4.3.4-STOCK-SSH-Update.img.dtb` (symlinked as `.img`).
+
+    ```bash
+    ./pack.sh
+    ```
+  </Step>
+</Steps>
+
+## MIXXX Bundle Pipeline
+
+After Buildroot finishes, collect the MIXXX binary and all its runtime dependencies into a `mixxx-bundle/` directory that can be deployed to the device's SD card.
+
+<Steps>
+  <Step title="Collect MIXXX bundle">
+    Gather MIXXX, Qt 5.15.8 plugins, MIDI mappings, ALSA libraries, audio codecs, and all other shared libraries from the Buildroot output directory. The script uses `readelf` to recursively resolve all `NEEDED` entries and copies the result to `mixxx-bundle/`.
+
+    ```bash
+    ./scripts/dev-collect-mixxx-bundle.sh
+    ```
+
+    The script also fixes the Mali GPU driver at this step: Buildroot ships the r0p0 DDK, but the device has hardware r1p0. The collected bundle replaces `libEGL.so` and `libGLESv2.so` with symlinks to the device's native `/usr/lib/libmali.so.14.0`.
+  </Step>
+
+  <Step title="Remove system-critical libraries">
+    Strip the nine libraries that must come from the device's `/lib`. Bundling them causes an ABI mismatch with the running kernel and results in SIGABRT or SIGSEGV at startup.
+
+    ```bash
+    ./scripts/dev-fix-device-libs.sh
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  The following libraries must **never** be included in `mixxx-bundle/lib/`. They are provided by the device's own `/lib` and must remain there to match the running kernel's ABI:
+
+  | Library | Role |
+  |---|---|
+  | `libc.so.6` | C standard library |
+  | `libm.so.6` | Math library |
+  | `libpthread.so.0` | POSIX threads |
+  | `libdl.so.2` | Dynamic linker |
+  | `librt.so.1` | POSIX real-time extensions |
+  | `libstdc++.so.6` | C++ standard library |
+  | `libgcc_s.so.1` | GCC runtime |
+  | `ld-linux-armhf.so.3` | Dynamic linker/loader |
+  | `libatomic.so.1` | GCC atomic operations |
+
+  `dev-fix-device-libs.sh` removes these automatically. If you add them back manually, MIXXX will segfault immediately on launch.
+</Warning>
+
+## Create a Distributable SD Card Bundle
+
+To produce the `prime-series-sdcard-*.tar.gz` release archive for end users:
+
+```bash
+./scripts/dev-create-sdcard-bundle.sh
+```
+
+This assembles the complete SD card layout including the TKGL bootstrap framework, MIXXX bundle, install scripts, and device services into a single tarball.
+
+## Fast Iteration
+
+When iterating on launcher scripts, MIDI mappings, or settings without changing the MIXXX binary, skip the full bundle collection step:
+
+```bash
+./scripts/dev-quick-fix-deploy.sh
+```
+
+This redeploys only changed files, significantly faster than a full `dev-deploy-to-device.sh` run.
+
+## PortAudio NDEBUG Fix
+
+<Note>
+  If MIXXX crashes with `SIGABRT` during ALSA device enumeration at startup, the PortAudio build is missing the `-DNDEBUG` flag. To fix it, add `-DNDEBUG` to the `TARGET_CFLAGS` in Buildroot's PortAudio package file:
+
+  ```makefile
+  # buildroot/2021.02.10/package/portaudio/portaudio.mk
+  PORTAUDIO_CONF_OPTS += CFLAGS="$(TARGET_CFLAGS) -DNDEBUG"
+  ```
+
+  Without this, PortAudio's internal assertion on ALSA channel detection fires and aborts the process before any audio device is opened. This is a one-time change — rebuild PortAudio after editing the `.mk` file with `make portaudio-rebuild` inside the Buildroot tree.
+</Note>

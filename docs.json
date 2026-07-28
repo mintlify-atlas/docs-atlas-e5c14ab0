@@ -1,72 +1,71 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "primemixxx",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#ab5c47",
+    "light": "#313133",
+    "dark": "#c2c4c5"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
+  "favicon": "https://icons.duckduckgo.com/ip3/mixxx.org.ico",
   "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "light": "https://media.brand.dev/b7d47957-747f-4b82-b438-53add48dbaea.svg",
+    "dark": "https://media.brand.dev/b7d47957-747f-4b82-b438-53add48dbaea.svg"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/gueritta/primemixxx"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/gueritta/primemixxx"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "devices"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/build",
+              "guides/deploy",
+              "guides/sd-card",
+              "guides/switching"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/boot-chain",
+              "architecture/cpu-shielding",
+              "architecture/display",
+              "architecture/audio"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/midi-mapping",
+              "reference/hardware",
+              "reference/firmware",
+              "reference/troubleshooting",
+              "reference/broken-experiments"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

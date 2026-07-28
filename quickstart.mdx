@@ -1,47 +1,150 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with primemixxx on Denon Prime Hardware"
+sidebarTitle: "Quickstart"
+description: "Install MIXXX on your Denon Prime Go or Prime 4 in four steps: download the SD card bundle, prepare the card, run the installer, and reboot."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+Getting MIXXX running on your Denon Prime Go or Prime 4 takes about ten minutes and requires no compilation or firmware flashing. The entire installation lives on an SD card — your device's internal storage and Engine OS are left untouched. Remove the SD card at any time to return to stock Engine OS instantly.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+<Warning>
+**Prime 4 users:** MIXXX boots and all audio/MIDI controls work, but the Prime 4's DSI display currently causes a GPU crash on EGL initialization. MIXXX will run in offscreen (headless) mode — the hardware controls and audio pipeline are functional, but there is no on-device display output. See the [Devices](/devices) page for full details.
+</Warning>
 
-## Prerequisites
+## Requirements
 
-Before you begin, you must have:
+- Denon Prime Go or Denon Prime 4
+- microSD card, **32 GB or larger**
+- A computer with an SD card reader (Linux, macOS, or Windows with WSL)
+- SSH access to the device (USB or WiFi — see Step 3)
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+---
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+<Step title="Download the SD card bundle">
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Grab the latest release from GitHub:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+**[github.com/gueritta/primemixxx/releases/latest](https://github.com/gueritta/primemixxx/releases/latest)**
+
+Download the file named `prime-series-sdcard-*.tar.gz` (approximately 25 MB). This archive contains the complete MIXXX bundle, Qt 5.15.8 libraries, EGLFS plugins, MIDI controller mappings, and the TKGL Bootstrap launcher — everything that runs from the SD card.
+
+</Step>
+
+<Step title="Prepare the SD card">
+
+Format the SD card as **ext4** with the label `TKGL_BOOTSTRAP`, then extract the bundle onto it. Replace `/dev/sdX1` with the actual device node for your SD card partition.
+
+```bash
+# Format as ext4 with the required label
+sudo mkfs.ext4 -L TKGL_BOOTSTRAP /dev/sdX1
+
+# Mount the card
+sudo mount /dev/sdX1 /mnt/sdcard
+
+# Extract the bundle onto the card
+sudo tar xzf prime-series-sdcard-*.tar.gz -C /mnt/sdcard
+
+# Unmount cleanly before ejecting
+sudo umount /mnt/sdcard
+```
+
+<Note>
+The label `TKGL_BOOTSTRAP` is required — the device's boot hook looks for a volume with exactly this name. The filesystem must be ext4; vfat is not supported.
+</Note>
+
+</Step>
+
+<Step title="Install the boot hook (one-time)">
+
+This step writes a small delegation stub to the device's internal storage. It only needs to be done once. The stub tells the device to hand control to the TKGL Bootstrap on the SD card when the card is present.
+
+First, SSH into the device. Insert the SD card and power on, then connect via USB or WiFi.
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+**Prefer USB Ethernet.** When you connect the device's USB-C port to your computer, it appears as a USB Ethernet gadget at `192.168.42.1`. This connection is reliable, fast, and never drops — ideal for the install step and any future file transfers.
 </Tip>
+
+```bash
+# Connect via USB Ethernet gadget (preferred)
+ssh root@192.168.42.1   # password: denonprime4
+```
+
+<Note>
+If you prefer WiFi, find the device IP on your router or try `primego.local` (mDNS). WiFi connections drop after ~30 seconds of silence — keep a keepalive running if you use it: `ping -i 25 <device-ip> > /dev/null &`
+
+```bash
+# Connect via WiFi
+ssh root@<device-ip>    # password: denonprime4
+# or
+ssh root@primego.local  # password: denonprime4
+```
+</Note>
+
+Once SSH'd in, run the one-time install script from the SD card:
+
+```bash
+sh /media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/install-device.sh
+```
+
+The installer backs up your original `engine.service`, writes the delegation stub to internal storage, and interactively offers optional features:
+
+- **USB Ethernet gadget** — auto-starts at boot for reliable SSH access
+- **Power button shutdown** — graceful shutdown instead of hard power-off during MIXXX sessions
+- **mDNS fix** — corrects hostname advertisement (`primego.local`)
+- **WiFi stability** — disables WiFi power save to prevent SSH session drops
+
+</Step>
+
+<Step title="Reboot and enjoy">
+
+```bash
+ssh root@192.168.42.1 reboot
+```
+
+After rebooting with the SD card inserted, the device automatically detects `TKGL_BOOTSTRAP`, launches the bootstrap, and starts MIXXX. No SSH needed for normal use.
+
+**To switch back to Engine OS**, simply remove the SD card before powering on. The device falls back to the original `engine.service` and loads Engine OS normally.
+
+**To re-enable MIXXX**, re-insert the SD card and reboot.
+
+</Step>
+
+</Steps>
+
+---
+
+## Switching Between MIXXX and Engine OS at Runtime
+
+You can switch without rebooting via SSH:
+
+```bash
+# Switch to MIXXX (starts the TKGL bootstrap and MIXXX service)
+ssh root@192.168.42.1 switch-to-mixxx
+
+# Switch back to stock Engine OS
+ssh root@192.168.42.1 switch-to-engine
+```
+
+---
+
+## Loading Your Music Library
+
+Plug a USB drive formatted with MP3s into any USB port on the device. The drive auto-mounts via udev and MIXXX scans it on startup. No manual mounting required.
+
+<Note>
+MIXXX's sandbox blocks direct access to vfat (FAT32) filesystems. The launcher works around this by bind-mounting the USB drive to an ext4-backed path before MIXXX starts. Your files are not modified — only the mount path changes.
+</Note>
+
+---
+
+## Uninstalling
+
+To fully remove the boot hook and restore the device to stock Engine OS:
+
+```bash
+ssh root@192.168.42.1
+sh /media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/uninstall-device.sh
+```
+
+This restores your original `engine.service` backup from internal storage. After uninstalling, you can remove the SD card permanently and the device operates exactly as it did before.

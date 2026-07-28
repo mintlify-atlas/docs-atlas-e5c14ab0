@@ -1,0 +1,219 @@
+---
+title: "Denon Prime Go Hardware Reference and Specifications"
+sidebarTitle: "Hardware"
+description: "Hardware specifications, component details, LED protocols, SysEx format, and device-level paths for the Denon Prime Go and Prime 4."
+---
+
+The Denon Prime Go and Prime 4 share the same Rockchip SoC platform running a stripped-down Buildroot Linux environment — no X11, no Wayland, no conventional desktop stack. This page documents the physical hardware specifications, on-device paths, MIDI control layout, and LED protocols needed when developing or debugging primemixxx.
+
+---
+
+## Hardware Specifications
+
+| Component | Detail |
+|:---|:---|
+| **SoC** | Rockchip RK3288 ARMv7 (Cortex-A17, 4 cores) |
+| **GPU** | Mali-T76x (4 cores, r1p0 0x0750) |
+| **Kernel** | `6.1.111-inmusic-2024-09-19-rt41` with `PREEMPT_RT` |
+| **OS** | Stripped-down Buildroot Linux — no X11, no Wayland |
+| **Display** | 7-inch touchscreen, LVDS-1, portrait framebuffer 800×1280 rotated to 1280×800 landscape |
+| **Touchscreen** | ILI2117 on `/dev/input/event0` |
+| **Audio** | XMOS XS1-U6A USB audio controller → AKM AK4621 CODEC + AK4413 DAC |
+| **MIDI** | Internal USB MIDI (platters, faders, pads all exposed as MIDI controllers) |
+
+---
+
+## Device Access
+
+| Method | Address |
+|:---|:---|
+| SSH (USB Ethernet gadget) | `root@192.168.42.1` |
+| SSH (WiFi / mDNS) | `root@primego.local` |
+| Password | `denonprime4` |
+
+Use the USB Ethernet gadget (`192.168.42.1`) for large file transfers and long debugging sessions — it has no dropout risk. WiFi (`primego.local`) is convenient for quick commands but drops after ~30 seconds of silence without a keepalive.
+
+---
+
+## Device Paths
+
+| Path | Purpose |
+|:---|:---|
+| `/media/az01-internal/` | SD card mount (MIXXX bundle lives here) |
+| `/data/` | Internal storage |
+| `/media/TKGL_BOOTSTRAP/` | TKGL SD card bootstrap mount |
+| `hw:JP11,0` | ALSA audio device |
+| `/dev/input/event0` | Touchscreen (ILI2117) |
+| `/sys/devices/platform/ffa30000.gpu/` | Mali GPU sysfs |
+| `/dev/dri/card0` | DRM display card |
+
+---
+
+## Sound Cards
+
+```
+card 0 [Surface]: USB control surface (MIDI/HID — no audio)
+card 1 [JP11]:    XMOS XS1-U6A main audio interface
+```
+
+The `JP11` card (card 1) is the audio interface. The `Surface` card (card 0) carries only MIDI/HID — it does not route audio.
+
+---
+
+## Mali GPU
+
+The device GPU is hardware revision **r1p0**. Buildroot ships the Mali DDK at r0p0 by default, which is ABI-incompatible with the on-device kernel driver. Any bundled `libEGL.so` / `libGLESv2.so` built against r0p0 will fail EGL initialization at runtime.
+
+```bash
+# Check GPU hardware revision
+cat /sys/devices/platform/ffa30000.gpu/gpuinfo
+# r1p0 0x0750
+
+# Set performance governor for reduced rendering latency
+echo performance > /sys/devices/platform/ffa30000.gpu/devfreq/ffa30000.gpu/governor
+```
+
+See [Troubleshooting](/reference/troubleshooting) for the Mali DDK mismatch symlink fix.
+
+---
+
+## Device Trees
+
+Product codes and device tree source files for both devices live in the `devicetrees/` directory of the repository:
+
+| Product Code | Hardware |
+|:---:|:---|
+| **JC11** | Denon Prime 4 |
+| **JP11** | Denon Prime Go |
+
+The `JP11` product code appears throughout MIDI channel names, ALSA device names, and firmware image filenames.
+
+---
+
+## Deck Controls Reference
+
+Source: `JP11_Controller_Device.qml`, `JP11_Controller_Assignments.qml`. Deck channels: 2 = Left, 3 = Right (0-indexed QML); MIXXX channels 3 and 4 respectively.
+
+| Control | Note | CC | LED Type | MIXXX Input |
+|---|:---:|:---:|:---:|:---|
+| **Load** | `0x01` (L) / `0x02` (R) | — | Simple | `LoadSelectedTrack` / shift = `eject` |
+| **Sync** | `0x08` | — | — | `sync_enabled` toggle |
+| **Cue** | `0x09` | — | Simple ✅ | `cue_default` / shift = `set_cue_point` |
+| **Play** | `0x0A` | — | Simple ✅ | `play` toggle |
+| **HotCue Mode** | `0x0B` | — | RGB | Pad mode: CUES |
+| **Loop Mode** | `0x0C` | — | RGB | Pad mode: LOOPS |
+| **Roll Mode** | `0x0D` | — | RGB | Pad mode: ROLL |
+| **Pads 1–8** | `0x0F`–`0x16` | — | **RGB** | `hotcue_N_activate` / shift = `hotcue_N_clear` |
+| **Pitch Bend −** | `0x1D` | — | — | `rate_temp_down_small` |
+| **Pitch Bend +** | `0x1E` | — | — | `rate_temp_up_small` |
+| **Jog Touch** | `0x21` | — | — | `engine.scratchEnable` |
+| **Vinyl** | `0x23` | — | Simple | Toggle `vinylMode` (edge-detect) |
+| **AutoLoop Push** | `0x27` | — | Simple | `beatloop_activate` / shift = `beatlooproll` |
+| **AutoLoop Turn** | — | `0x20` | Simple | `beatloop_size` / shift = `beatjump_size` |
+| **Pitch Fader MSB** | — | `0x1F` | — | `rate` (14-bit with LSB) |
+| **Pitch Fader LSB** | — | `0x4B` | — | `rate` LSB |
+| **Jog Wheel MSB** | — | `0x37` | — | `jogWheel.inputWheelMSB` |
+| **Jog Wheel LSB** | — | `0x4D` | — | `jogWheel.inputWheelLSB` |
+
+---
+
+## Mixer Channel Controls Reference
+
+Channels: 0 = Left (MIXXX ch 1), 1 = Right (MIXXX ch 2).
+
+| Control | Note | CC | LED Type | MIXXX Input |
+|---|:---:|:---:|:---:|:---|
+| **PFL** | `0x0D` | — | **Simple** | `pfl` toggle |
+| **Filter FX Select** | `0x0E` | — | — | Filter effect enable |
+| **Wash FX Select** | `0x0F` | — | — | Wash effect enable |
+| **Trim** | — | `0x03` | — | `pregain` |
+| **Treble** | — | `0x04` | — | `[EqualizerRack1_ChannelN_Effect1], parameter3` |
+| **Mid** | — | `0x06` | — | `parameter2` |
+| **Bass** | — | `0x08` | — | `parameter1` |
+| **Filter / Sweep** | — | `0x0A` | — | `[QuickEffectRack1_ChannelN], super1` |
+| **Sweep FX Knob** | — | `0x0B` | — | `[QuickEffectRack1_ChannelN], super1` |
+| **Fader** | — | `0x0E` | — | `volume` |
+| **VU Meter** | — | `0x20` (L) / `0x21` (R) | CC out | `VuMeter` engine output |
+
+---
+
+## Global Controls Reference
+
+Channel: 15 (0-indexed QML) = MIXXX channel 16 (`0x9F` Note On).
+
+| Control | Note | CC | LED Type | MIXXX Input |
+|---|:---:|:---:|:---:|:---|
+| **Back** | `0x03` | — | **Simple** | `[Library], MoveFocusBackward` |
+| **Forward** | `0x04` | — | **Simple** | `[Library], MoveFocusForward` (shift = Quantize) |
+| **Browse Encoder Push** | `0x06` | — | **Simple** | `[Library], GoToItem` |
+| **View** | `0x07` | — | **Simple** | `[Master], maximize_library` toggle |
+| **Shift** | `0x08` | — | **Simple** | `PrimeGo.shiftButton` |
+| **Eject / Source** | `0x14` | — | hasLed | Eject (shift = Source select) |
+| **Browse Encoder Turn** | — | `0x05` | **Simple** | `PrimeGo.browseEncoder` (shift = 15-step scroll) |
+| **Cue Mix** | — | `0x0C` | — | `[Master], headMix` |
+| **Cue Gain** | — | `0x0D` | — | `[Master], headVolume` |
+| **Crossfader** | — | `0x0E` | — | `[Master], crossfader` |
+| **Mic 1** | `0x24` | — | — | Mic on/off + talkover |
+| **Mic 2** | `0x25` | — | — | Mic on/off |
+
+---
+
+## FX Controls Reference
+
+Channel: 4 (QML) = MIXXX channel 5 (`0x94` Note On).
+
+| Control | Note | CC |
+|---|:---:|:---:|
+| **FX Activate** | `0x06` | — |
+| **FX Select Push** | `0x07` | — |
+| **FX Time Push** | `0x08` | — |
+| **FX Select Touch** | `0x09` | — |
+| **FX Assign 1** | `0x0B` | — |
+| **FX Assign 2** | `0x0C` | — |
+| **FX Wet/Dry** | — | `0x04` |
+| **FX Select Turn** | — | `0x21` |
+| **FX Time Turn** | — | `0x22` |
+
+---
+
+## LED Protocols
+
+### SysEx RGB (`LedType.RGB`)
+
+Per `JP11_Controller_Device.qml`:
+
+```
+F0 00 02 0B 7F 0C 03 00 05 <ch_hex> <idx_hex> <r_hex> <g_hex> <b_hex> F7
+```
+
+- **Gamma**: 3.5 (`padGamma` is also 3.5 for pad indices 15–22)
+- **Color calculation**: `Math.floor(Math.pow(c, gamma) * 127)` where `c` is normalized 0–1
+- **Used by**: Action Pads (notes `0x0F`–`0x16`), Performance Mode buttons
+
+```javascript
+const sendSysexRGB = function(channel, control, red, green, blue) {
+    const msg = [0xf0, 0x00, 0x02, 0x0b, 0x7f, 0x0C, 0x03, 0x00, 0x05,
+                 channel, control, red, green, blue, 0xf7];
+    midi.sendSysexMsg(msg, msg.length);
+};
+```
+
+### Simple Note On/Off (`LedType.Simple`)
+
+```
+Note On:  9<ch> <idx> <vel>    (vel > 0 → LED on, color from palette)
+Note Off: 8<ch> <idx> 00       (fully off)
+```
+
+Confirmed working for: Cue, Play, Load, Back, Forward, Browse Encoder Push, View, Shift, AutoLoop, PFL, Vinyl.
+
+| Value | Color | Used For |
+|:---:|:---|:---|
+| `0x00` | Fully off | All off states |
+| `0x01` | Very dim glow | Load (empty) |
+| `0x02` | Subtle dim | Back, Forward (always lit) |
+| `0x09` | Dim yellow | Shift off |
+| `0x0C` | Green | Play on, Load (track loaded) |
+| `0x1A` | Amber / orange | Cue on |
+| `0x20` | Bright green | Sync on |
+| `0x40` | Red | Vinyl on |

@@ -1,0 +1,126 @@
+---
+title: "Firmware Flashing for Denon Prime Go"
+sidebarTitle: "Firmware"
+description: "Flash custom or stock-with-SSH firmware to the Denon Prime Go using fastboot, USB drive, or the Go-based updater CLI tool."
+---
+
+The Denon Prime Go ships with a locked-down Engine OS that does not include SSH access. To develop or debug primemixxx on-device you need to flash the **stock-with-SSH** firmware variant, which is a stock Engine OS image with an SSH key pre-installed and the USB Ethernet gadget enabled. A fully custom MIXXX firmware image also exists but currently has a known SSH-disabled blocker — see the warning below.
+
+<Warning>
+After flashing the custom MIXXX firmware (`PRIMEGO-4.3.4-MIXXX-SSH-Update.img`), port 22 is refused — `sshd.service` is not enabled in the Buildroot defconfig. You cannot SSH into the device until you restore the stock-with-SSH firmware. Always use `PRIMEGO-4.3.4-STOCK-SSH-Update.img` for day-to-day development.
+</Warning>
+
+---
+
+## Available Firmware Images
+
+| File | Description |
+|:---|:---|
+| `PRIMEGO-4.3.4-STOCK-SSH-Update.img` | ✅ Recommended — stock Engine OS + SSH key + USB Ethernet gadget |
+| `PRIMEGO-4.3.4-MIXXX-SSH-Update.img` | ⚠️ Custom MIXXX firmware — SSH currently broken after flash |
+| `PRIMEGO-4.3.4-Update.img` | Stock firmware, no SSH access |
+| `PRIMEGO-2.3.2-Update.img` – `PRIMEGO-4.3.3-Update.img` | Historical stock versions (2.3.2–4.3.3) |
+| `PRIME4-2.2.1-Update.img` – `PRIME4-4.3.4-Update.img` | Prime 4 stock versions (2.2.1–4.3.4) |
+
+`.img` files are symlinks to their corresponding `.img.dtb` Device Tree Blob packages.
+
+---
+
+## Rebuilding the Stock-SSH Firmware
+
+To rebuild `PRIMEGO-4.3.4-STOCK-SSH-Update.img` from its source DTS and rootfs:
+
+```bash
+# Source DTS: PRIMEGO-4.3.4-STOCK-SSH-Update.img.dts
+# Rootfs:     unpacked-ssh-img/rootfs-stock-ssh.img.xz
+make PRIMEGO-4.3.4-STOCK-SSH-Update.img.dtb
+```
+
+The `.dtb` file is the firmware package consumed by fastboot and the Go updater. The `.img` symlink points to it.
+
+<Note>
+Use `go run ./cmd/find_update/` from the `go/` directory to identify and locate firmware update files in the repository.
+</Note>
+
+---
+
+## Flashing Methods
+
+<Steps>
+
+### Method 1: Go Updater Tool (Recommended)
+
+The cross-platform Go-based updater uses libusb and the FastBoot protocol directly.
+
+```bash
+# 1. Put the device in update (loader) mode via SSH
+ssh root@primego.local reboot loader
+
+# 2. Run the updater from the go/ directory
+cd go && go run ./cmd/updater/ --firmware ../PRIMEGO-4.3.4-STOCK-SSH-Update.img
+```
+
+The updater will detect the device via USB, verify the firmware SHA1 checksum, decompress the rootfs on-the-fly, and flash each partition. A GUI progress window is displayed during flashing.
+
+### Method 2: USB Drive Flash
+
+Use this method if fastboot reports "too large for partition" (see Known Issues below).
+
+1. Format a USB drive as **FAT32**
+2. Copy the `.img` file to the **root** of the USB drive
+3. Insert the USB drive into the Prime Go
+4. Power the device into **update mode** (hold the power button and select Update, or use the hardware recovery sequence)
+5. The device will detect the firmware file and flash automatically
+
+### Method 3: SSH + fastboot (Requires SSH Already Enabled)
+
+Only usable if you already have SSH access:
+
+```bash
+# Put device in loader/fastboot mode
+ssh root@primego.local reboot loader
+
+# Flash using system fastboot CLI
+fastboot flash system ../PRIMEGO-4.3.4-STOCK-SSH-Update.img
+```
+
+</Steps>
+
+---
+
+## Go Updater CLI Reference
+
+The Go updater (`go/cmd/updater/`) implements FastBoot over libusb with a GUI progress display.
+
+| Flag | Default | Description |
+|:---|:---:|:---|
+| `--firmware <path>` | _(required)_ | Path to the firmware `.img` file to flash |
+| `--debug <level>` | `4` | Logging level: `-4` = debug, `0` = info, `4` = error only |
+| `--logfile <path>` | _(empty)_ | Write logs to file (disabled if empty) |
+| `--libusb_debug <level>` | `0` | libusb debug verbosity (`0`–`3`) |
+| `--skip_reboot` | `false` | Skip automatic device reboot after flashing |
+| `--dry` | `false` | Dry run — device must be connected but will not be flashed |
+
+```bash
+# Example: flash with debug logging to file
+cd go && go run ./cmd/updater/ \
+  --firmware ../PRIMEGO-4.3.4-STOCK-SSH-Update.img \
+  --debug -4 \
+  --logfile /tmp/updater.log
+```
+
+The updater reads device IDs, firmware version, and partition layout from the Device Tree Blob embedded in the `.img` file. SHA1 checksum verification is performed before flashing begins.
+
+<Note>
+The Go updater takes roughly twice as long as the system `fastboot` CLI due to buffer size differences in the FastBoot implementation (~30s for `fastboot`, ~60s for the Go tool). This is a known limitation — see `go/doc/updater.md` for details.
+</Note>
+
+---
+
+## Known Issues
+
+<Warning>
+**"Too large for partition" via fastboot** — `rootfs-stock-ssh.img.xz` unpacks to ~512 MB and may exceed the Prime Go's rootfs partition size when flashed via fastboot. The stock rootfs fits exactly; the SSH additions push it just over the limit.
+
+**Workaround**: Use the **USB drive flashing method** (Method 2 above) instead of the Go updater or `fastboot` CLI. The device's update mode reads directly from USB mass storage and handles the partition layout differently.
+</Warning>
