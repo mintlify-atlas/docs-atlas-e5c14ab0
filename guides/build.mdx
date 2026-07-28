@@ -1,5 +1,5 @@
 ---
-title: "Build MIXXX from Source for Denon Prime Hardware"
+title: "Build MIXXX from Source for Denon Prime Go and Prime 4"
 sidebarTitle: "Build from Source"
 description: "Cross-compile MIXXX for ARMv7 using Buildroot 2021.02.10, then pack the result into a firmware image or distributable SD card bundle."
 ---
@@ -28,6 +28,7 @@ The top-level `Makefile` delegates to shell scripts. All targets are `.PHONY` an
 | `clone-buildroot` | `./clone-buildroot.sh` | Clone Buildroot 2021.02.10 into `buildroot/` |
 | `compile-buildroot` | `./compile-buildroot.sh` | Build toolchain + all packages (requires sudo for loopback mount) |
 | `configure-buildroot` | `./configure-buildroot.sh` | Apply primemixxx defconfig to Buildroot |
+| `clean-buildroot-target` | `./clean-buildroot-target.sh` | Remove Buildroot's `target/` tree to force a clean reinstall of all packages |
 | `pack` | `./pack.sh` | Pack modified rootfs images into a firmware `.dtb` |
 | `dist` | `./dist.sh` | Produce a distributable SD card tarball |
 | `generate-updater-win` | `./generate-updater-win.sh` | Build original Windows updater tool |
@@ -140,12 +141,19 @@ This redeploys only changed files, significantly faster than a full `dev-deploy-
 ## PortAudio NDEBUG Fix
 
 <Note>
-  If MIXXX crashes with `SIGABRT` during ALSA device enumeration at startup, the PortAudio build is missing the `-DNDEBUG` flag. To fix it, add `-DNDEBUG` to the `TARGET_CFLAGS` in Buildroot's PortAudio package file:
+  If MIXXX crashes with `SIGABRT` during ALSA device enumeration at startup, the PortAudio build is missing the `-DNDEBUG` flag. The fix is already applied in `patches/portaudio-ndebug.mk` via a post-configure hook that patches the generated `Makefile` after `./configure` runs. Copy this file to `buildroot/2021.02.10/package/portaudio/portaudio.mk` to apply it:
 
   ```makefile
-  # buildroot/2021.02.10/package/portaudio/portaudio.mk
-  PORTAUDIO_CONF_OPTS += CFLAGS="$(TARGET_CFLAGS) -DNDEBUG"
+  # patches/portaudio-ndebug.mk — drop into package/portaudio/portaudio.mk
+  # Disable assertions for embedded ARM — PortAudio's assert(maxChans > 0)
+  # fires during ALSA device enumeration on strict embedded hardware (JP11/AKM DACs)
+  # where some plugin PCMs return 0 channels.
+  # The CFLAGS env var doesn't override Makefile CFLAGS, so we sed the Makefile.
+  define PORTAUDIO_ADD_NDEBUG
+  	$(SED) 's/^CFLAGS = /CFLAGS = -DNDEBUG /' $(@D)/Makefile
+  endef
+  PORTAUDIO_POST_CONFIGURE_HOOKS += PORTAUDIO_ADD_NDEBUG
   ```
 
-  Without this, PortAudio's internal assertion on ALSA channel detection fires and aborts the process before any audio device is opened. This is a one-time change — rebuild PortAudio after editing the `.mk` file with `make portaudio-rebuild` inside the Buildroot tree.
+  Without this, PortAudio's internal `assert(maxChans > 0)` fires during ALSA device enumeration on the JP11/AKM DAC and aborts the process before any audio device is opened. After replacing the `.mk` file, rebuild PortAudio with `make portaudio-rebuild` inside the Buildroot tree.
 </Note>

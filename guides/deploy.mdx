@@ -1,5 +1,5 @@
 ---
-title: "Deploy MIXXX to Denon Prime via SSH"
+title: "Deploy MIXXX to Denon Prime Go or Prime 4 via SSH"
 sidebarTitle: "Deploy"
 description: "Use the developer deploy scripts to push the MIXXX bundle to your device over SSH, install systemd services, and keep the device in sync with the repo."
 ---
@@ -126,8 +126,8 @@ ssh root@<ip> 'mount | grep TKGL_BOOTSTRAP'
 
 | Path | Purpose |
 |---|---|
-| `/media/az01-internal/` | SD card mount point |
-| `/media/TKGL_BOOTSTRAP/` | TKGL SD card root |
+| `/media/TKGL_BOOTSTRAP/` | TKGL SD card root (label `TKGL_BOOTSTRAP`, mounted by TKGL stub) |
+| `/media/az01-internal/` | Internal eMMC az01 partition (optional fast-load mirror for MIXXX binaries) |
 | `/data/` | Internal eMMC storage |
 | `/data/mixxx/mixxx` | Thin delegator script (points to SD card launcher) |
 | `/etc/systemd/system/engine.service` | Modified engine service (TKGL stub) |

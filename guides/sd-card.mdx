@@ -1,5 +1,5 @@
 ---
-title: "SD Card Layout and Bundle Structure"
+title: "SD Card Layout, Bundle Structure, and Launcher Reference"
 sidebarTitle: "SD Card"
 description: "Reference for the SD card directory structure, MIXXX bundle contents, launcher script, and the USB music library setup for primemixxx."
 ---
@@ -12,16 +12,17 @@ The primemixxx SD card is a microSD formatted as ext4 with label `TKGL_BOOTSTRAP
 |---|---|
 | **Label** | `TKGL_BOOTSTRAP` |
 | **Filesystem** | ext4 |
-| **Mount point** | `/media/az01-internal` (internal SD slot, managed by `edisksd`) |
+| **Mount point** | `/media/TKGL_BOOTSTRAP` (mounted by the TKGL stub at boot) |
 | **Activation** | `echo external > /sys/bus/platform/devices/sd-mux/state` |
-| **MIXXX bundle root** | `/media/az01-internal/mixxx/` (`$BUNDLE`) |
+| **MIXXX bundle root** | `/media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/` (`$BUNDLE`) |
+| **Internal eMMC mirror** | `/media/az01-internal/mixxx/` (`$INTERNAL_BUNDLE`, used when present for faster loading) |
 
 ## Directory Structure
 
-The MIXXX bundle lives at `/media/az01-internal/mixxx/`. Everything MIXXX needs at runtime — libraries, plugins, mappings, and settings — is self-contained here.
+The MIXXX bundle lives at `/media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/`. Everything MIXXX needs at runtime — libraries, plugins, mappings, and settings — is self-contained here.
 
 ```
-/media/az01-internal/mixxx/
+/media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/
 ├── mixxx.real                        # 17 MB binary — DO NOT USE (causes EGLFS crash)
 ├── bin/
 │   └── mixxx -> ../lib/bin/mixxx     # Symlink to working 10 MB binary
@@ -76,28 +77,63 @@ The MIXXX bundle lives at `/media/az01-internal/mixxx/`. Everything MIXXX needs 
   The `bin/mixxx` symlink **must** point to `../lib/bin/mixxx`. Never redirect it to `../mixxx.real`. Verify the symlink target with:
 
   ```bash
-  ls -la /media/az01-internal/mixxx/bin/mixxx
+  ls -la /media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/bin/mixxx
   # Should print: bin/mixxx -> ../lib/bin/mixxx
   ```
 </Warning>
 
 ## Launcher Script
 
-The launcher at `mixxx_launcher.sh` is the real entry point for MIXXX. A thin delegator on internal storage (`/data/mixxx/mixxx`) calls it:
+The launcher at `mixxx_launcher.sh` is the real entry point for MIXXX. The TKGL bootstrap stub on internal eMMC mounts the SD card and then executes the launcher directly from the TKGL SD card path.
+
+The full SD card launcher auto-detects the device model, sets environment variables, mounts the USB music library, applies I/O and VM tuning, and then applies CPU shielding after MIXXX launches:
 
 ```sh
 #!/bin/sh
-# TKGL entry point on internal eMMC — delegates to SD card
-exec /media/az01-internal/mixxx/mixxx_launcher.sh "$@"
-```
+# MIXXX Launcher — Denon Prime Go / Prime 4 (SD card)
+# Auto-detects device model via DRM connector and applies correct display settings.
 
-The full SD card launcher sets environment variables, mounts the USB music library, and applies CPU shielding after launch:
+# Guard against duplicate instances (systemd-run may restart before old process exits)
+if pidof mixxx > /dev/null 2>&1; then
+    echo "Mixxx already running, exiting."
+    exit 0
+fi
 
-```sh
-#!/bin/sh
-# MIXXX Launcher — Denon Prime Go (SD card)
-BUNDLE=/media/az01-internal/mixxx
+# Detect device model from DRM connector
+# Prime Go  = DSI-1  (rotation 90,  no vsync needed)
+# Prime 4   = LVDS-1 (rotation 270, needs SWAPINTERVAL=1)
+detect_device() {
+    if [ -f /sys/class/drm/card0-DSI-1/status ] && \
+       grep -q connected /sys/class/drm/card0-DSI-1/status 2>/dev/null; then
+        DEVICE="primego"
+        ROTATION=90
+        SWAPINTERVAL=0
+    else
+        DEVICE="prime4"
+        ROTATION=270
+        SWAPINTERVAL=1
+    fi
+    echo "[launcher] detected device: $DEVICE (rotation=$ROTATION swapinterval=$SWAPINTERVAL)"
+}
+detect_device
+
+BUNDLE=/media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle
 MUSIC_DIR="$BUNDLE/music"
+
+# Internal eMMC storage for binaries and libraries (50MHz/8-bit bus vs 25MHz/4-bit SD).
+# Loading Qt 5.15.8, Mali integration, and MIXXX binary from fast internal storage
+# eliminates MMC bus contention on the external SD during audio playback.
+INTERNAL_BUNDLE="/media/az01-internal/mixxx"
+if [ -d "$INTERNAL_BUNDLE/lib" ] && [ -f "$INTERNAL_BUNDLE/lib/bin/mixxx" ]; then
+    BIN_PATH="$INTERNAL_BUNDLE/bin"
+    LIB_PATH="$INTERNAL_BUNDLE/lib"
+    PLUGIN_PATH="$INTERNAL_BUNDLE/qt-plugins"
+else
+    echo "[launcher] internal lib not found, falling back to SD bundle"
+    BIN_PATH="$BUNDLE/bin"
+    LIB_PATH="$BUNDLE/lib"
+    PLUGIN_PATH="$BUNDLE/qt-plugins"
+fi
 
 # USB Music Library: mount USB drive to music directory if present
 mount_usb_music() {
@@ -112,50 +148,70 @@ mount_usb_music() {
 }
 mount_usb_music
 
-export LD_PRELOAD=$BUNDLE/lib/no_hid_poll.so
-export QT_PLUGIN_PATH="$BUNDLE/qt-plugins"
-export LD_LIBRARY_PATH="$BUNDLE/lib:/usr/qt/lib:/usr/lib"
+# Work around kernel 6.1 hidraw netlink bug — udev's hid_enumerate() hangs without NLMSG_DONE
+export LD_PRELOAD=$LIB_PATH/no_hid_poll.so
+# Qt 5.15.8 plugins from SD card (NOT device's Qt 5.15.2 — eglfs_emu can't take over fbcon)
+export QT_PLUGIN_PATH="$PLUGIN_PATH"
+# SD Qt 5.15.8 first, device Qt 5.15.2 fallback, then system libs
+export LD_LIBRARY_PATH="$LIB_PATH:/usr/qt/lib:/usr/lib"
 export QT_QPA_PLATFORM=eglfs
 export QT_QPA_EGLFS_INTEGRATION=eglfs_mali
-export QT_QPA_EGLFS_ROTATION=90
+export QT_QPA_EGLFS_SWAPINTERVAL="$SWAPINTERVAL"
+export QT_QPA_EGLFS_ROTATION="$ROTATION"
 export QT_QPA_FONTDIR=/usr/share/fonts
-export QT_QPA_GENERIC_PLUGINS=evdevtouch:/dev/input/event0,evdevkeyboard:/dev/input/event1
-export QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS=/dev/input/event0:rotate=90
+export QT_QPA_GENERIC_PLUGINS="evdevtouch:/dev/input/event0 evdevkeyboard:/dev/input/event1"
+export QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS="/dev/input/event0:rotate=$ROTATION:minX=0:maxX=1280:minY=0:maxY=800"
 export QT_QPA_EGLFS_PHYSICAL_WIDTH=155
 export QT_QPA_EGLFS_PHYSICAL_HEIGHT=98
 export HOME=/tmp
 export XDG_RUNTIME_DIR=/tmp
 
-# Launch at SCHED_OTHER on cores 2-3 — do NOT use SCHED_FIFO on the main
-# process; all 44+ child threads (Mali GPU, CachingReader, Qt pool, etc.)
-# would inherit RT priority and compete with the audio engine.
-taskset -c 2,3 $BUNDLE/bin/mixxx \
-  -platform eglfs \
-  --settingsPath $BUNDLE/settings \
-  --resourcePath $BUNDLE "$@" &
+# Disable RT throttling — audio threads need 100% of their timeslice.
+echo -1 > /proc/sys/kernel/sched_rt_runtime_us
+
+# I/O & VM latency optimizations
+for blk in mmcblk0 mmcblk1; do
+    echo none > "/sys/block/$blk/queue/scheduler" 2>/dev/null
+    echo 512 > "/sys/block/$blk/queue/read_ahead_kb" 2>/dev/null
+    echo 64 > "/sys/block/$blk/queue/nr_requests" 2>/dev/null
+done
+echo 20480 > /proc/sys/vm/dirty_background_bytes 2>/dev/null
+echo 1 > /proc/sys/vm/swappiness
+echo 200 > /proc/sys/vm/vfs_cache_pressure
+echo 10 > /proc/sys/vm/stat_interval
+for mp in /data /media/az01-internal /media/TKGL_BOOTSTRAP; do
+    mountpoint -q "$mp" 2>/dev/null && mount -o remount,noatime,nodiratime,commit=60 "$mp" 2>/dev/null
+done
+
+# Launch MIXXX pinned to CPU cores 2-3 (audio-dedicated cores).
+# We do NOT set RT priority on the main process — that would cause ALL
+# 44+ child threads to inherit SCHED_FIFO and compete with audio.
+taskset -c 2,3 $BIN_PATH/mixxx -platform eglfs --settingsPath $BUNDLE/settings --resourcePath $BUNDLE "$@" &
 MIXPID=$!
 
 # Post-launch: selectively boost audio-critical threads, banish everything else
-BANISH="mali-|CachingReader|QEvdevTouch|StatsManager|QDBus|VinylControl|\
-LibraryScanner|BrowseThread|AnalyzerThread|Controller$|VSync|gmain|gdbus|\
-Thread \(pooled\)|QQuickPixmapRea|QQmlThread"
+BANISH_PATTERNS="mali-|CachingReader|QEvdevTouch|StatsManager|QDBus|VinylControl|LibraryScanner|BrowseThread|AnalyzerThread|Controller$|VSync|gmain|gdbus|Thread \(pooled\)|QQuickPixmapRea|QQmlThread|libusb_event"
 
 for i in $(seq 1 12); do
     sleep 1
     for tid in $(ls /proc/$MIXPID/task/ 2>/dev/null); do
         name=$(cat /proc/$MIXPID/task/$tid/comm 2>/dev/null)
-        case "$name" in EngineWorkerSch|EngineSideChain)
-            chrt -f -p 98 $tid 2>/dev/null
-            taskset -p 0x0C $tid 2>/dev/null ;; esac
-        if echo "$name" | grep -qE "$BANISH"; then
+        case "$name" in
+            EngineWorkerSch|EngineSideChain)
+                chrt -f -p 98 $tid 2>/dev/null
+                taskset -p 0x0C $tid 2>/dev/null
+                ;;
+        esac
+        if echo "$name" | grep -qE "$BANISH_PATTERNS"; then
             chrt -o -p 0 $tid 2>/dev/null
             taskset -p 0x03 $tid 2>/dev/null
         fi
     done
 done
-# Main thread: low RT for MIDI/UI responsiveness, stays on audio cores
-chrt -f -p 1 $MIXPID 2>/dev/null
-taskset -p 0x0C $MIXPID 2>/dev/null
+# Pin main process to non-audio cores 0-1 at SCHED_OTHER so newly-spawned
+# threads (e.g. Qt thread pool) inherit non-audio affinity by default.
+chrt -o -p 0 $MIXPID 2>/dev/null
+taskset -p 0x03 $MIXPID 2>/dev/null
 
 wait $MIXPID
 ```
@@ -164,14 +220,17 @@ wait $MIXPID
 
 | Variable | Value | Purpose |
 |---|---|---|
-| `LD_LIBRARY_PATH` | `$BUNDLE/lib:/usr/qt/lib:/usr/lib` | Bundle libs first, then device Qt 5.15.2 fallback, then system |
-| `QT_PLUGIN_PATH` | `$BUNDLE/qt-plugins` | Qt 5.15.8 plugins (EGLFS Mali integration) |
+| `LD_LIBRARY_PATH` | `$LIB_PATH:/usr/qt/lib:/usr/lib` | Bundle libs first, then device Qt 5.15.2 fallback, then system |
+| `QT_PLUGIN_PATH` | `$PLUGIN_PATH` | Qt 5.15.8 plugins (EGLFS Mali integration) |
 | `QT_QPA_PLATFORM` | `eglfs` | Framebuffer display, no X11/Wayland |
 | `QT_QPA_EGLFS_INTEGRATION` | `eglfs_mali` | Custom Mali integration plugin (critical for display) |
-| `QT_QPA_EGLFS_ROTATION` | `90` | Logical screen is 1280×800 landscape; GPU framebuffer is 800×1280 portrait |
-| `QT_QPA_GENERIC_PLUGINS` | `evdevtouch:/dev/input/event0,evdevkeyboard:/dev/input/event1` | Touchscreen and keyboard input |
-| `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS` | `rotate=90` | Maps ILI2117 physical coordinates to Qt's rotated coordinate system |
-| `LD_PRELOAD` | `$BUNDLE/lib/no_hid_poll.so` | Skips hidraw udev scan (kernel 6.1.111 never sends NLMSG_DONE) |
+| `QT_QPA_EGLFS_ROTATION` | `90` (Prime Go) or `270` (Prime 4) | Set dynamically by `detect_device()`; logical screen is 1280×800 landscape |
+| `QT_QPA_EGLFS_SWAPINTERVAL` | `0` (Prime Go) or `1` (Prime 4) | Prime 4 DSI-1 needs vsync to prevent tearing; Prime Go LVDS-1 does not |
+| `QT_QPA_GENERIC_PLUGINS` | `evdevtouch:/dev/input/event0 evdevkeyboard:/dev/input/event1` | Touchscreen and keyboard input (space-separated) |
+| `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS` | `/dev/input/event0:rotate=$ROTATION:minX=0:maxX=1280:minY=0:maxY=800` | Maps ILI2117 physical coordinates to Qt's rotated coordinate system |
+| `QT_QPA_EGLFS_PHYSICAL_WIDTH` | `155` | Physical display width in mm (Prime Go 5″ display) |
+| `QT_QPA_EGLFS_PHYSICAL_HEIGHT` | `98` | Physical display height in mm |
+| `LD_PRELOAD` | `$LIB_PATH/no_hid_poll.so` | Skips hidraw udev scan (kernel 6.1.111 never sends NLMSG_DONE) |
 | `HOME` | `/tmp` | Avoids writing to `/root` on read-only rootfs |
 | `XDG_RUNTIME_DIR` | `/tmp` | Required by Qt/D-Bus on embedded systems |
 
@@ -180,7 +239,7 @@ wait $MIXPID
 | Layer | Configuration |
 |---|---|
 | **Audio threads** | `EngineWorkerSch` + `EngineSideChain` at `SCHED_FIFO` 98, pinned to cores 2-3 |
-| **Main thread** | `SCHED_FIFO` 1, cores 2-3 (low RT for MIDI/UI responsiveness) |
+| **Main process** | `SCHED_OTHER`, pinned to cores 0-1 (so newly spawned threads inherit non-audio affinity) |
 | **Non-audio threads** | `SCHED_OTHER`, banished to cores 0-1 (Mali GPU, CachingReader, Qt pool, GLib, etc.) |
 | **RT throttling** | Disabled (`sched_rt_runtime_us=-1`) |
 | **IRQ affinity** | All non-audio IRQs (GPU, USB, MMC) pinned to CPU 0 at boot |
@@ -204,16 +263,16 @@ The launcher's `mount_usb_music()` function handles this automatically — it mo
 
 To check whether the library directory is registered:
 
-```sql
-sqlite3 /media/az01-internal/mixxx/settings/mixxxdb.sqlite \
+```bash
+sqlite3 /media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/settings/mixxxdb.sqlite \
   "SELECT directory FROM directories;"
 ```
 
 If the query returns nothing, insert the path manually:
 
-```sql
-sqlite3 /media/az01-internal/mixxx/settings/mixxxdb.sqlite \
-  "INSERT INTO directories (id, directory, volume) VALUES (1, '/media/az01-internal/mixxx/music', 1);"
+```bash
+sqlite3 /media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/settings/mixxxdb.sqlite \
+  "INSERT INTO directories (id, directory, volume) VALUES (1, '/media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/music', 1);"
 ```
 
 After inserting, set `RescanOnStartup=1` in `mixxx.cfg`, restart MIXXX once to trigger the scan, then set it back to `0`.
@@ -226,7 +285,7 @@ FirstRun=1
 HasScreenedForLibraryDir=1
 
 [Library]
-Directory[0]=/media/az01-internal/mixxx/music
+Directory[0]=/media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/music
 RescanOnStartup=0
 ```
 

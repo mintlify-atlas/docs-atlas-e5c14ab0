@@ -11,7 +11,7 @@ Getting a Qt application to render on the Denon Prime's embedded display is more
 | Component | Detail |
 |---|---|
 | GPU | Mali-T76x (4 cores, r1p0 `0x0750`) on Rockchip RK3288 |
-| Display connector | LVDS-1 (Prime Go) / DSI-1 (Prime 4) |
+| Display connector | DSI-1 (Prime Go) / LVDS-1 (Prime 4) |
 | Native framebuffer | 800×1280 portrait |
 | Qt logical screen | 1280×800 landscape (display controller rotates the framebuffer) |
 | Touchscreen | ILI2117 on `/dev/input/event0` |
@@ -92,42 +92,44 @@ Running at the `ondemand` governor causes visible frame rate drops during wavefo
 
 ## Prime 4 Differences
 
-The Prime 4 uses a DSI-1 display connector rather than the LVDS-1 connector on the Prime Go. Both devices share the same Mali-T76x r1p0 GPU, Rockchip RK3288 SoC, and 800×1280 portrait framebuffer, but the DSI-1 controller applies rotation in the opposite direction and introduces a vsync issue.
+The Prime 4 uses an LVDS-1 display connector rather than the DSI-1 connector on the Prime Go. Both devices share the same Mali-T76x r1p0 GPU, Rockchip RK3288 SoC, and 800×1280 portrait framebuffer, but the LVDS-1 controller applies rotation in the opposite direction and introduces a vsync issue.
 
 ### Display Hardware
 
 | Property | Prime Go | Prime 4 |
 |---|---|---|
-| Connector | LVDS-1 | DSI-1 |
-| DRM sysfs path | `card0-LVDS-1` | `card0-DSI-1` |
+| Connector | DSI-1 | LVDS-1 |
+| DRM sysfs path | `card0-DSI-1` | `card0-LVDS-1` |
 | Framebuffer driver | `rockchipdrmfb` | `rockchipdrmfb` |
 | Native resolution | 800×1280 portrait | 800×1280 portrait |
 | Screen tearing | Not observed | Present without vsync |
 
 ### Rotation
 
-| Setting | Prime Go (LVDS-1) | Prime 4 (DSI-1) |
+| Setting | Prime Go (DSI-1) | Prime 4 (LVDS-1) |
 |---|---|---|
 | `QT_QPA_EGLFS_ROTATION` | **90** | **270** |
 | `QT_QPA_EVDEV_TOUCHSCREEN_PARAMETERS` rotate | **90** | **270** |
 
-All four rotation values (0, 90, 180, 270) were tested on the Prime 4. Only 270 produced the correct orientation. The DSI-1 controller applies rotation in the opposite direction compared to LVDS-1.
+All four rotation values (0, 90, 180, 270) were tested on the Prime 4. Only 270 produced the correct orientation. The LVDS-1 controller applies rotation in the opposite direction compared to DSI-1.
 
 ### Screen Tearing Fix (Prime 4)
 
-The DSI-1 DRM path handles page-flip timing differently from LVDS-1 and exhibits visible tearing by default. Enable vsync:
+The LVDS-1 DRM path handles page-flip timing differently from DSI-1 and exhibits visible tearing by default. Enable vsync:
 
 ```bash
 export QT_QPA_EGLFS_SWAPINTERVAL=1
 ```
 
-This setting is **not** needed on Prime Go (LVDS-1), which syncs correctly without it.
+This setting is **not** needed on Prime Go (DSI-1), which syncs correctly without it.
 
 ### Device Auto-Detection
 
 The launcher detects the device model by checking the DRM connector status:
 
 ```sh
+# Prime Go  = DSI-1  (rotation 90,  no vsync needed)
+# Prime 4   = LVDS-1 (rotation 270, needs SWAPINTERVAL=1)
 if [ -f /sys/class/drm/card0-DSI-1/status ] && \
    grep -q connected /sys/class/drm/card0-DSI-1/status 2>/dev/null; then
     DEVICE="primego"

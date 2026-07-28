@@ -1,5 +1,5 @@
 ---
-title: "Switch Between MIXXX and Engine OS at Runtime"
+title: "Switch Between MIXXX and Engine OS on Denon Prime"
 sidebarTitle: "Switching"
 description: "Use switch-to-mixxx and switch-to-engine SSH commands to toggle between MIXXX and stock Engine OS without rebooting or removing the SD card."
 ---
@@ -174,9 +174,8 @@ engine.service (TKGL stub)
        └─ mod_mixxx module (tkgl_mod_mixxx.sh)
             └─ systemd-run --unit=mixxx-app
                  └─ mixxx-app.service  ← transient unit
-                      └─ /data/mixxx/mixxx (thin delegator)
-                           └─ /media/az01-internal/mixxx/mixxx_launcher.sh
-                                └─ MIXXX binary
+                      └─ /media/TKGL_BOOTSTRAP/tkgl_bootstrap_DenonPrimeGO/mixxx-bundle/mixxx_launcher.sh
+                           └─ MIXXX binary
 ```
 
 The key property of this chain: if anything in the TKGL layer fails — missing SD card, corrupt launcher, wrong permissions — you can always remove the SD card and reboot to drop back to stock Engine OS via `engine.service.orig`.

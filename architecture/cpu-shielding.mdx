@@ -29,7 +29,7 @@ The launcher implements a two-phase approach:
     A 12-iteration loop (running for ~12 seconds after launch) inspects every thread in MIXXX's task group by name. Audio-critical threads are boosted to `SCHED_FIFO 98` and pinned to cores 2–3. All other threads are demoted to `SCHED_OTHER` and banished to cores 0–1.
   </Step>
   <Step title="Main thread assignment">
-    After the loop completes, the main MIXXX process itself is set to `SCHED_FIFO 1` on cores 2–3. The low RT priority keeps MIDI and UI responsive without competing with the audio engine.
+    After the loop completes, the main MIXXX process is set to `SCHED_OTHER 0` (normal scheduling) and pinned to cores 0–1. This ensures that any new threads spawned after the classification loop (such as Qt thread pool workers) inherit non-audio affinity by default, rather than landing on the audio-dedicated cores.
   </Step>
 </Steps>
 
@@ -65,31 +65,35 @@ Everything else is banished. The full banish list used by the launcher:
 | `Thread (pooled)` | Qt generic thread pool workers |
 | `QQuickPixmapRea` | Qt Quick image loader |
 | `QQmlThread` | QML JavaScript engine thread |
+| `libusb_event` | libusb event-handling thread (XMOS controller) |
 
 ## The Launcher Post-Launch Loop
 
 This is the exact working code from `mixxx_launcher.sh`:
 
 ```bash
-BANISH="mali-|CachingReader|QEvdevTouch|StatsManager|QDBus|VinylControl|\
-LibraryScanner|BrowseThread|AnalyzerThread|Controller$|VSync|gmain|gdbus|\
-Thread \(pooled\)|QQuickPixmapRea|QQmlThread"
+BANISH_PATTERNS="mali-|CachingReader|QEvdevTouch|StatsManager|QDBus|VinylControl|LibraryScanner|BrowseThread|AnalyzerThread|Controller$|VSync|gmain|gdbus|Thread \(pooled\)|QQuickPixmapRea|QQmlThread|libusb_event"
 
 for i in $(seq 1 12); do
     sleep 1
     for tid in $(ls /proc/$MIXPID/task/ 2>/dev/null); do
         name=$(cat /proc/$MIXPID/task/$tid/comm 2>/dev/null)
-        case "$name" in EngineWorkerSch|EngineSideChain)
-            chrt -f -p 98 $tid 2>/dev/null
-            taskset -p 0x0C $tid 2>/dev/null ;; esac
-        if echo "$name" | grep -qE "$BANISH"; then
+        case "$name" in
+            EngineWorkerSch|EngineSideChain)
+                chrt -f -p 98 $tid 2>/dev/null
+                taskset -p 0x0C $tid 2>/dev/null
+                ;;
+        esac
+        if echo "$name" | grep -qE "$BANISH_PATTERNS"; then
             chrt -o -p 0 $tid 2>/dev/null
             taskset -p 0x03 $tid 2>/dev/null
         fi
     done
 done
-chrt -f -p 1 $MIXPID 2>/dev/null
-taskset -p 0x0C $MIXPID 2>/dev/null
+# Pin main process to non-audio cores 0-1 at SCHED_OTHER so newly-spawned
+# threads inherit non-audio affinity by default.
+chrt -o -p 0 $MIXPID 2>/dev/null
+taskset -p 0x03 $MIXPID 2>/dev/null
 ```
 
 The `0x0C` taskset mask (binary `1100`) pins threads to cores 2–3. The `0x03` mask (binary `0011`) pins threads to cores 0–1.
@@ -97,7 +101,7 @@ The `0x0C` taskset mask (binary `1100`) pins threads to cores 2–3. The `0x03` 
 <Warning>
 Do **not** set `SCHED_FIFO 99` (or any RT priority) on the main MIXXX process before the thread classification loop has run. MIXXX spawns 44+ child threads, and all of them inherit the scheduler policy of their parent. Setting the main process to `SCHED_FIFO 99` causes Mali GPU threads, Qt thread pool workers, GLib loops, and every other non-audio thread to run at real-time priority — directly competing with the audio engine and making latency *worse*, not better.
 
-The correct sequence is: launch at `SCHED_OTHER`, classify threads, then set the main process to `SCHED_FIFO 1` last.
+The correct sequence is: launch at `SCHED_OTHER`, classify threads, then move the main process to `SCHED_OTHER` on cores 0–1 last.
 </Warning>
 
 ## IRQ Affinity
@@ -138,9 +142,10 @@ The launcher applies a set of kernel tuning parameters before starting MIXXX to 
 - `nr_requests`: 128 → 64 — limits I/O queue depth to reduce dispatch latency
 
 **Virtual memory:**
-- `dirty_background_bytes`: 50 MB → 20 MB — forces earlier writeback to prevent large dirty-page flushes
+- `dirty_background_bytes`: set to `20480` bytes (20 KB) — forces early writeback to prevent large dirty-page flushes stalling the audio thread
 - `swappiness`: 60 → 1 — no swap device present; prevents pointless page reclaim
 - `vfs_cache_pressure`: 100 → 200 — aggressively reclaim dentry/inode cache under memory pressure
+- `stat_interval`: 1 s → 10 s — reduces periodic VM stat collection overhead by 10×
 
 **Filesystem:**
 - All `ext4` mounts remounted with `noatime,nodiratime,commit=60` — eliminates access-time metadata writes; batches journal commits to 60 s intervals

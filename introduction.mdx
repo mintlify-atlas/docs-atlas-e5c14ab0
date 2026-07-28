@@ -1,5 +1,5 @@
 ---
-title: "primemixxx: MIXXX on Denon Prime DJ Hardware"
+title: "primemixxx: Open-Source MIXXX on Denon Prime Hardware"
 sidebarTitle: "Introduction"
 description: "primemixxx runs open-source MIXXX DJ software on Denon Prime Go and Prime 4 hardware via a non-destructive SD card — no firmware modification needed."
 ---
@@ -30,7 +30,7 @@ The result is a fully functional two-deck DJ environment on the device's 7-inch 
 
 ## Architecture Overview
 
-primemixxx is built from four interlocking layers:
+primemixxx is built from five interlocking layers:
 
 **TKGL Bootstrap** is a modular, boot-time script-execution framework that lives on the SD card. At startup, the device's `engine.service` runs a thin delegation stub on internal storage that hands control to TKGL on the SD card. TKGL mounts USB drives, restores the library database, configures the GPU governor, and launches MIXXX as a transient systemd unit (`mixxx-app.service`). Because the stub on internal storage just delegates, removing the SD card reverts the device cleanly to Engine OS on next boot.
 
@@ -39,6 +39,8 @@ primemixxx is built from four interlocking layers:
 **Custom Mali EGLFS** works around a DDK version mismatch between Buildroot's default Mali r0p0 and the device's hardware Mali r1p0. The bundle symlinks its `libEGL.so` and `libGLESv2.so` directly to the device's native `/usr/lib/libmali.so.14.0`, and uses a custom-compiled `libqeglfs-mali-integration.so` that can take over the display from `fbcon` — something the stock device Qt 5.15.2 cannot do.
 
 **CPU shielding** isolates MIXXX's audio threads on CPU cores 2–3 at `SCHED_FIFO` priority 98, while all non-audio threads (Mali GPU, touchscreen, Qt thread pool, CachingReader) are banished to cores 0–1 at `SCHED_OTHER`. IRQ affinity pins all non-audio IRQs to CPU 0 at boot. This, combined with BFQ → `none` I/O scheduler tuning and filesystem `noatime` mounts, achieves stable 5.8 ms playback even under load.
+
+**Go updater** is a cross-platform CLI tool (`go/cmd/updater/`) that flashes the stock+SSH firmware image to the device over USB. It uses `reboot loader` to put the device into update mode, then transfers the `.img` file via the Rockchip USB protocol — replacing the Windows-only original updater tool and enabling firmware updates from Linux or macOS without a proprietary utility.
 
 ## Why This Project Exists
 
@@ -58,7 +60,7 @@ The project is a fork of [@ghuntley/denon-prime4](https://github.com/ghuntley/de
   <Card title="Build Guide" icon="hammer" href="/guides/build">
     Cross-compile MIXXX for ARMv7 using Buildroot and assemble a distributable SD card bundle.
   </Card>
-  <Card title="Architecture" icon="sitemap" href="/architecture">
+  <Card title="Boot Chain" icon="sitemap" href="/architecture/boot-chain">
     Deep dive into the boot chain, TKGL Bootstrap, Mali EGLFS stack, and CPU shielding strategy.
   </Card>
 </CardGroup>
